@@ -4,7 +4,7 @@ import re
 
 from datetime import datetime
 
-file_path = "B_k-494884_ALL_23-04.xls"
+file_path = "B_k-494884_ALL_23-04-COPY.xls"
 
 valid_operations = [
     "Проценты по займам \"овернайт ЦБ\"",
@@ -62,32 +62,24 @@ for row_idx in range(sheet.nrows):
 
 
     elif "Период:" in row_str and "по" in row_str:
-
         print(f"[Header Debug] Row {row_idx} → {row_str}")  # ← Добавим для отладки
 
         try:
-
             parts = row_str.split()
-
             # Найти дату после слова "с"
-
             for i in range(len(parts)):
-
                 if parts[i] == "с" and i + 1 < len(parts):
                     header_data["date_start"] = parse_date(parts[i + 1])
 
                 if parts[i] == "по" and i + 1 < len(parts):
                     header_data["date_end"] = parse_date(parts[i + 1])
-
         except Exception as e:
-
             print(f"Failed to parse period on row {row_idx}: {e}")
 
     # Валюта
     elif row_str in ["Рубль", "USD", "EUR"]:
         currency = row_str
 
-    # Начало таблицы операций
     elif (
         "Дата" in row_str and
         "Операция" in row_str and
@@ -96,27 +88,66 @@ for row_idx in range(sheet.nrows):
         parsing_operations = True
         continue
 
+    elif row and isinstance(row[1], str) and parse_date(row[1]):
+        operation = row[2].strip()
 
-    elif parsing_operations:
-        if len(row) < 2 or not isinstance(row[1], str) or not parse_date(row[1]):
-            continue
+        # Пропускаем операции: "Займы \"овернайт\"", "Покупка/Продажа", "НКД от операций", "Покупка/Продажа (репо)"
+        skip_operations = [
+            'Займы "овернайт"',
+            "Покупка/Продажа",
+            "НКД от операций",
+            "Покупка/Продажа (репо)"
+        ]
 
-        operation = row[2].strip() if len(row) > 2 else ""
+        if operation in skip_operations:
+            continue  # Пропускаем текущую строку
 
+        # Проверка на валидные операции и пропуск строки, если операция "Итого"
         if operation in valid_operations and "Итого" not in operation:
-            print(f"Row debug: {row_idx} → {row}")
+            note = ""
 
-            # Собираем и обрезаем примечание
-            # с учётом сдвига (пропущен первый столбец), берём ячейки 15–19 → это индексы 14–18
-            note = ' '.join([str(row[i]).strip() for i in range(14, 19) if i < len(row)]).strip()
-            note = note.split(',')[0].strip()
+            # Обработка примечания (ячейки с 14 по 19)
+            if len(row) > 14:
+                raw_notes = row[14:19]
+                combined_note = " ".join(str(cell).strip() for cell in raw_notes if cell)
+                note = combined_note.split(",")[0] if combined_note else ""
 
-            print(f"Note extracted: {note}")
+            # Определение типа операции
+            operation_type = ""
+
+            # Спецификация для "Приход ДС"
+            if operation == "Приход ДС":
+                operation_type = "deposit"
+            if operation == "Погашение купона":
+                operation_type = "coupon"
+            elif operation == "Дивиденды":
+                operation_type = "dividend"
+            elif operation == "Погашение облигации":
+                operation_type = "repayment"
+            elif operation == "Частичное погашение облигации":
+                operation_type = "amortization"
+            elif operation == "Вывод ДС":
+                operation_type = "withdrawal"
+
+            # Обработка "Проценты по займам 'овернайт'" и "Проценты по займам 'овернайт ЦБ'" одинаково
+            if operation in ['Проценты по займам "овернайт"', 'Проценты по займам "овернайт ЦБ"']:
+                income = str(row[6]).strip() if len(row) > 6 else ""  # Сумма зачисления на индексе 6
+                expense = str(row[7]).strip() if len(row) > 7 else ""  # Сумма списания на индексе 7
+                print(f"[DEBUG] Row {row_idx} → income: '{income}', expense: '{expense}'")  # Дебаг
+
+                # Устанавливаем operation_type в зависимости от значений
+                if income and income != "0" and income != "0.0":  # Если есть значение в "Сумма зачисления"
+                    operation_type = "other_income"
+                elif expense and expense != "0" and expense != "0.0":  # Если есть значение в "Сумма списания"
+                    operation_type = "other_expense"
+
+            # Добавляем операцию в результат
             operations.append({
                 "date": parse_date(row[1]),
                 "operation": operation,
-                "note": note,
-                "currency": currency
+                "operation_type": operation_type,
+                "currency": currency,
+                "comment": note,
             })
 
 result = {
