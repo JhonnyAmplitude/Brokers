@@ -1,14 +1,13 @@
 import os
 import re
+import json
 from datetime import datetime
 from typing import Any, Generator, List, Dict, Optional, Tuple, Union
 
 import xlrd
 import openpyxl
 
-FILE_PATH = "1.xls"
-
-# --- Константы и справочники ---
+# --- Константы ---
 
 VALID_OPERATIONS = {
     "Проценты по займам \"овернайт ЦБ\"", "Приход ДС", "Проценты по займам \"овернайт\"",
@@ -37,7 +36,6 @@ SPECIAL_OPERATION_HANDLERS = {
     "НДФЛ": lambda i, e: "refund" if is_nonzero(i) else "withholding",
 }
 
-
 # --- Вспомогательные функции ---
 
 def is_nonzero(value: Any) -> bool:
@@ -46,58 +44,44 @@ def is_nonzero(value: Any) -> bool:
     except (ValueError, TypeError):
         return False
 
+def parse_date(date_value: Union[str, int, float]) -> Optional[str]:
+    if not date_value:
+        return None
+    if isinstance(date_value, (int, float)):
+        try:
+            dt = datetime(*xlrd.xldate_as_tuple(date_value, 0))
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return None
+    date_str = str(date_value).strip()
+    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            continue
+    return None
 
 def extract_isin(comment: str) -> Optional[str]:
     match = re.search(r'\b[A-Z]{2}[A-Z0-9]{10}\b', comment)
     return match.group(0) if match else None
 
-
 def extract_dividend_details(comment: str) -> Dict[str, str]:
     result = {}
-
     parts = comment.split(",")
     if parts:
         result["instrument_name"] = parts[0].strip()
-
     isin = extract_isin(comment)
     if isin:
         result["isin"] = isin
-
     match = re.search(r'налог\s+([\d\s]+,\d{2})', comment)
     if match:
         result["withholding"] = match.group(1).replace(" ", "").replace(",", ".")
-
     return result
-
-
-def parse_date(date_str: Union[str, int, float]) -> Optional[str]:
-    if not date_str:
-        return None
-    if isinstance(date_str, (int, float)):
-        try:
-            result = datetime(*xlrd.xldate_as_tuple(date_str, 0)).date().isoformat()
-            print(f"Parsed date from float: {date_str} -> {result}")  # Логирование
-            return result
-        except Exception:
-            return None
-
-    date_str = str(date_str).strip()
-    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
-        try:
-            result = datetime.strptime(date_str, fmt).date().isoformat()
-            return result
-        except ValueError:
-            continue
-    return None
-
-
 
 def extract_note(row: List[Any]) -> str:
     NOTE_COLUMNS = slice(14, 19)
     return " ".join(str(cell).strip() for cell in row[NOTE_COLUMNS] if cell)
-
-
-# --- Парсинг Excel ---
 
 def get_rows_from_file(file_path: str) -> Generator[List[Any], None, None]:
     ext = os.path.splitext(file_path)[1].lower()
@@ -110,24 +94,21 @@ def get_rows_from_file(file_path: str) -> Generator[List[Any], None, None]:
         for row in sheet.iter_rows(values_only=True):
             yield list(row)
     else:
-        raise ValueError("Неподдерживаемый формат файла")
+        raise ValueError("Unsupported file format")
 
+# --- Первая часть: операции ---
 
-# --- Основной парсер ---
 def process_operation_row(row: List[Any], currency: str) -> Optional[Dict[str, Any]]:
     date = parse_date(row[1])
     if not date:
         return None
-
     operation = str(row[2]).strip()
     if operation not in VALID_OPERATIONS or operation in SKIP_OPERATIONS:
         return None
-
     income = str(row[6]).strip()
     expense = str(row[7]).strip()
     payment_sum = income if is_nonzero(income) else expense
     comment = extract_note(row)
-
     operation_type = OPERATION_TYPE_MAP.get(operation, "")
     if handler := SPECIAL_OPERATION_HANDLERS.get(operation):
         operation_type = handler(income, expense)
@@ -140,16 +121,11 @@ def process_operation_row(row: List[Any], currency: str) -> Optional[Dict[str, A
         "comment": comment,
         "payment_sum": payment_sum,
     }
-
     if operation == "Погашение купона":
         entry["isin"] = extract_isin(comment)
     elif operation == "Дивиденды":
         entry.update(extract_dividend_details(comment))
-
     return entry
-
-
-# --- Основной парсер ---
 
 def parse_rows(rows: Generator[List[Any], None, None]) -> Tuple[Dict[str, Optional[str]], List[Dict[str, Any]]]:
     header_data = {"account_id": None, "account_date_start": None, "date_start": None, "date_end": None}
@@ -161,21 +137,12 @@ def parse_rows(rows: Generator[List[Any], None, None]) -> Tuple[Dict[str, Option
         row_str = " ".join(str(cell) for cell in row[1:] if cell).strip()
 
         if "Генеральное соглашение:" in row_str:
-            print("Processing row:", row_str)  # Логируем строку для отладки
-
-            # Используем регулярное выражение для поиска номера соглашения
             agreement_match = re.search(r"Генеральное соглашение:\s*(\d+)", row_str)
             if agreement_match:
-                account_id = agreement_match.group(1)
-                header_data["account_id"] = account_id
-                print(f"Extracted account_id: {account_id}")  # Логируем для отладки
-
-            # Используем регулярное выражение для поиска даты после "от"
+                header_data["account_id"] = agreement_match.group(1)
             date_match = re.search(r"от\s+(\d{2}\.\d{2}\.\d{4})", row_str)
             if date_match:
-                date_str = date_match.group(1)
-                header_data["account_date_start"] = parse_date(date_str)
-                print(f"Extracted account_date_start: {header_data['account_date_start']}")  # Логируем для отладки
+                header_data["account_date_start"] = parse_date(date_match.group(1))
 
         elif "Период:" in row_str and "по" in row_str:
             parts = row_str.split()
@@ -198,21 +165,13 @@ def parse_rows(rows: Generator[List[Any], None, None]) -> Tuple[Dict[str, Option
             if entry:
                 operations.append(entry)
 
-    # Логируем значения для отладки
-    print("account_date_start:", header_data["account_date_start"])
-
     return header_data, operations
 
-def safe_float(value):
-    try:
-        return float(str(value).replace(',', '.'))
-    except (ValueError, TypeError):
-        return None
-
+# --- Вторая часть: сделки ---
 
 def parse_stock_row(row, isin, name, reg_number):
     return {
-        "date": row[1],
+        "date": parse_date(row[1]),
         "number": row[2],
         "quantity": float(row[4]),
         "price": float(row[5]),
@@ -224,7 +183,7 @@ def parse_stock_row(row, isin, name, reg_number):
 
 def parse_bond_row(row, isin, name, reg_number):
     return {
-        "date": row[1],
+        "date": parse_date(row[1]),
         "number": row[2],
         "quantity": float(row[4]),
         "price": float(row[5]),
@@ -235,18 +194,17 @@ def parse_bond_row(row, isin, name, reg_number):
         "reg_number": reg_number
     }
 
-
-def parse_deals_block(block_rows):
-    deals = []
-    current_type = None  # "stocks" или "bonds"
+def parse_trades_from_rows(rows: Generator[List[Any], None, None]) -> Dict[str, List[Dict[str, Any]]]:
+    stocks = []
+    bonds = []
+    current_type = None
     reg_number = None
     isin = None
     name = None
 
-    for row in block_rows:
-        row_str = [str(cell) for cell in row]
+    for row in rows:
+        row_str = [str(cell) for cell in row if cell]
 
-        # Извлечение номера регистрации и ISIN
         if any("Номер рег." in cell for cell in row_str):
             for i, cell in enumerate(row_str):
                 if "Номер рег." in cell:
@@ -257,7 +215,6 @@ def parse_deals_block(block_rows):
                     name = cell.strip()
             continue
 
-        # Проверка на наличие "Акция" или "Облигация"
         if any("Облигация" in cell for cell in row_str):
             current_type = "bonds"
             continue
@@ -265,26 +222,39 @@ def parse_deals_block(block_rows):
             current_type = "stocks"
             continue
 
-        # Пропускаем пустые строки или строки без данных
-        if not any(row_str):
+        if not row_str:
             continue
 
-        # Обработка данных по сделкам
         try:
             if current_type == "bonds":
-                deal = parse_bond_row(row_str, isin, name, reg_number)
+                bonds.append(parse_bond_row(row, isin, name, reg_number))
             elif current_type == "stocks":
-                deal = parse_stock_row(row_str, isin, name, reg_number)
-            else:
-                continue  # Пропускаем строки, которые не относятся к акциям или облигациям
-            deals.append(deal)
+                stocks.append(parse_stock_row(row, isin, name, reg_number))
         except Exception as e:
             print(f"⚠️ Ошибка при парсинге сделки: {row_str} → {e}")
 
-    return deals
+    return {"stocks": stocks, "bonds": bonds}
+
+# --- Основной сборщик ---
+
+def parse_full_statement(filepath: str) -> dict:
+    rows1 = get_rows_from_file(filepath)
+    header_data, operations = parse_rows(rows1)
+
+    rows2 = get_rows_from_file(filepath)
+    trades_data = parse_trades_from_rows(rows2)
+
+    return {
+        "account_info": header_data,
+        "operations": operations,
+        "stocks": trades_data.get("stocks", []),
+        "bonds": trades_data.get("bonds", [])
+    }
+
+# --- Запуск ---
 
 
+filepath = "1.xls"  # Путь к файлу
+result = parse_full_statement(filepath)
 
-
-
-
+print(json.dumps(result, ensure_ascii=False, indent=2))
