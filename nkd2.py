@@ -1,24 +1,34 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Optional, Dict, Any
+from dataclasses import dataclass
+from datetime import datetime
+import openpyxl
+import xlrd
 import os
 import re
 import json
-import openpyxl
-import xlrd
-from datetime import datetime
 
 currency_dict = {
     "SEK": "SEK", "NOK": "NOK", "AED": "AED", "XAG": "XAG", "ZAR": "ZAR",
     "TRY": "TRY", "XAU": "XAU", "HKD": "HKD", "TJS": "TJS", "UZS": "UZS",
-    "KGS": "KGS", "KZT": "KZT", "JPY": "JPY", "AMD": "AMD", "Рубль": "RUB",
-    "USD": "USD", "EUR": "EUR", "BYN": "BYN", "GBP": "GBP", "CHF": "CHF", "CNY": "CNY"
+    "KGS": "KGS", "KZT": "KZT", "JPY": "JPY", "AMD": "AMD", "РУБЛЬ": "RUB",
+    "RUR": "RUB", "RUB": "RUB", "USD": "USD", "EUR": "EUR", "BYN": "BYN",
+    "GBP": "GBP", "CHF": "CHF", "CNY": "CNY"
 }
 
-def normalize_currency(raw_currency: Any) -> Optional[str]:
-    if not isinstance(raw_currency, str):
-        return None
-    normalized = raw_currency.strip()
-    return currency_dict.get(normalized, normalized)
-
+@dataclass
+class OperationDTO:
+    date: str
+    operation_type: str
+    payment_sum: float
+    currency: str
+    ticker: str
+    isin: Optional[str]
+    price: float
+    quantity: int
+    aci: Optional[float]
+    comment: str
+    operation_id: Optional[str]
+    _sort_key: Optional[str] = None  # внутреннее поле, для сортировки по дате-времени
 
 def read_excel_file(filepath: str, file_ext: str) -> List[List[Any]]:
     if file_ext == '.xlsx':
@@ -29,6 +39,12 @@ def read_excel_file(filepath: str, file_ext: str) -> List[List[Any]]:
         return [sheet.row_values(i) for i in range(sheet.nrows)]
     else:
         raise ValueError('Неподдерживаемый формат файла')
+
+def normalize_currency(value: Any) -> str:
+    if not value:
+        return ""
+    value = str(value).strip().upper()
+    return currency_dict.get(value, value)
 
 def clean_date(value):
     if value is None:
@@ -45,12 +61,10 @@ def clean_date(value):
         value = value.strip()
         for fmt in ("%d.%m.%Y", "%d.%m.%y"):
             try:
-                date_obj = datetime.strptime(value, fmt)
-                return date_obj.strftime("%Y-%m-%d")
+                return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
             except ValueError:
                 continue
     return None
-
 
 def clean_time(value):
     if value is None:
@@ -72,6 +86,12 @@ def clean_time(value):
                 continue
     return "00:00:00"
 
+def detect_new_ticker(row: List[Any]) -> bool:
+    return any('isin' in str(cell).lower() for cell in row if cell)
+
+def extract_ticker(row: List[Any]) -> Optional[str]:
+    return row[0].split()[0].strip() if row and isinstance(row[0], str) else None
+
 def extract_isin(row: List[Any]) -> Optional[str]:
     for i, cell in enumerate(row):
         if isinstance(cell, str) and 'isin' in cell.lower():
@@ -84,26 +104,18 @@ def extract_isin(row: List[Any]) -> Optional[str]:
                     return next_cell.strip()
     return None
 
-
-def extract_ticker(row: List[Any]) -> Optional[str]:
-    return row[0].split()[0].strip() if row and isinstance(row[0], str) else None
-
-
-def detect_new_ticker(row: List[Any]) -> bool:
-    return any('isin' in str(cell).lower() for cell in row if cell)
-
-
 def is_valid_trade_row(row: List[Any]) -> bool:
     if not row or not row[0] or (isinstance(row[0], str) and row[0].lower().startswith('итого')):
         return False
     return any(isinstance(cell, (int, float)) for cell in row)
 
-
 def is_section_start(row: List[Any], keywords: List[str]) -> bool:
     return any(keyword in str(cell).lower() for cell in row if cell for keyword in keywords)
 
+def safe_get(lst: List[Any], idx: int) -> Any:
+    return lst[idx] if idx < len(lst) else None
 
-def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str] = None) -> Dict[str, Any]:
+def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str] = None) -> OperationDTO:
     is_buy = bool(row[3])
     stock_mode = trade_type == "stock"
 
@@ -118,29 +130,35 @@ def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str
 
     operation_id = str(row[1]).strip() if row[1] else None
 
-    # Извлекаем только дату (время тоже можно извлечь, но не использовать)
-    date_str = clean_date(row[11 if stock_mode else 13])
+    if stock_mode:
+        trade_date = clean_date(row[11])
+        trade_time = clean_time(row[12])
+    else:
+        trade_date = clean_date(row[13])
+        trade_time = "00:00:00"
 
-    return {
-        "date": date_str,
-        "operation_type": "buy" if is_buy else "sell",
-        "payment_sum": payment,
-        "currency": currency,
-        "ticker": ticker,
-        "isin": isin if stock_mode else ticker,
-        "price": price,
-        "quantity": quantity,
-        "aci": "" if stock_mode else (row[6] if is_buy else row[10]),
-        "comment": comment,
-        "operation_id": operation_id,
-    }
+    sort_key = f"{trade_date} {trade_time}" if trade_date else None
 
+    return OperationDTO(
+        date=f"{trade_date} {trade_time}" if trade_date and trade_time else trade_date,
+        operation_type="buy" if is_buy else "sell",
+        payment_sum=payment,
+        currency=currency,
+        ticker=ticker,
+        isin=isin if stock_mode else ticker,
+        price=price,
+        quantity = int(quantity),
+        aci="" if stock_mode else (row[6] or row[10]),
+        comment=comment,
+        operation_id=operation_id,
+        _sort_key=sort_key
+    )
 
-def parse_trades(filepath: str) -> Dict[str, List[Dict[str, Any]]]:
+def parse_trades(filepath: str) -> List[Dict[str, Any]]:
     file_ext = os.path.splitext(filepath)[1].lower()
     rows = read_excel_file(filepath, file_ext)
 
-    stock_trades, bond_trades = [], []
+    result = []
     current_ticker, current_isin = None, None
     parsing_trades = parsing_stocks = parsing_bonds = False
 
@@ -168,15 +186,17 @@ def parse_trades(filepath: str) -> Dict[str, List[Dict[str, Any]]]:
 
         if is_valid_trade_row(row):
             if parsing_stocks:
-                stock_trades.append(parse_trade(row, "stock", current_ticker, current_isin))
+                result.append(parse_trade(row, "stock", current_ticker, current_isin))
             elif parsing_bonds:
-                bond_trades.append(parse_trade(row, "bond", current_ticker))
+                result.append(parse_trade(row, "bond", current_ticker))
 
-    return {
-        "stocks": stock_trades,
-        "bonds": bond_trades
-    }
+    # Сортировка по дате-времени (внутреннее поле)
+    result.sort(key=lambda x: (x._sort_key is None, x._sort_key))
 
+    # Преобразуем в список словарей и убираем поле _sort_key
+    return [dict((k, v) for k, v in op.__dict__.items() if not k.startswith('_')) for op in result]
+
+# Пример запуска
 filepath = "2.xls"
-result = parse_trades(filepath)
-print(json.dumps(result, ensure_ascii=False, indent=2))
+trades = parse_trades(filepath)
+print(json.dumps(trades, ensure_ascii=False, indent=2))

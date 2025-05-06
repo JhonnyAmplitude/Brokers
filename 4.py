@@ -1,9 +1,10 @@
-import json
+from typing import List, Dict, Any, Optional
+import os
 import re
+import json
 import openpyxl
 import xlrd
-import os
-
+from datetime import datetime
 
 def extract_isin(row):
     """Извлекает ISIN из строки или из соседней ячейки"""
@@ -19,8 +20,6 @@ def extract_isin(row):
                 if isinstance(next_cell, str) and re.match(r'^[A-Z0-9]{12}$', next_cell.strip()):
                     return next_cell.strip()
     return None
-
-
 
 def parse_trades(filepath):
     file_ext = os.path.splitext(filepath)[1].lower()
@@ -64,13 +63,20 @@ def parse_trades(filepath):
                 parsing_stocks = False
                 continue  # Пропускаем заголовок для облигаций
 
-            # Останавливаем парсинг, если встречаем другие разделы
-            if any("заем" in str(cell).lower() for cell in row if cell) or any("овернайт" in str(cell).lower() for cell in row if cell):
+            # Ищем строку, указывающую на начало АДР
+            elif not parsing_stocks and any("адр" in str(cell).lower() for cell in row if cell):
+                # Если это АДР, начинаем парсить как акции
+                parsing_stocks = True
+                parsing_bonds = False
+                continue  # Пропускаем заголовок для АДР
+
+            # Прерываем парсинг, если встречаем другие разделы
+            if any(keyword in str(cell).lower() for keyword in ["заем", "овернайт", "цб"] for cell in row if cell):
                 break  # Прерываем парсинг
 
             # Обрабатываем строки с данными сделок
             if is_valid_trade_row(row):
-                # Парсим акции
+                # Парсим акции (в том числе и АДР)
                 if parsing_stocks:
                     stock_trade = parse_trade(row, "stock", current_ticker, current_isin)
                     stock_trades.append(stock_trade)
@@ -84,10 +90,10 @@ def parse_trades(filepath):
         "bonds": bond_trades
     }
 
-def detect_new_ticker(row):
-    # Проверка на строки с тикером (например, ISIN)
-    return any('isin' in str(cell).lower() for cell in row if cell)
 
+def detect_new_ticker(row):
+    """Проверка на строки с тикером (например, ISIN)"""
+    return any('isin' in str(cell).lower() for cell in row if cell)
 
 def read_excel_file(filepath, file_ext):
     """Чтение данных из Excel-файла"""
@@ -101,7 +107,6 @@ def read_excel_file(filepath, file_ext):
         return [sheet.row_values(i) for i in range(sheet.nrows)]
     else:
         raise ValueError('Неподдерживаемый формат файла')
-
 
 def extract_ticker(row):
     """Извлечение тикера"""
@@ -117,46 +122,32 @@ def is_valid_trade_row(row):
     # Проверяем, есть ли данные, которые могут быть сделкой (например, цифры, даты)
     return any(isinstance(cell, (int, float)) for cell in row)
 
-def parse_trade(row, trade_type, ticker, isin=None):
+def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str] = None) -> Dict[str, Any]:
     """Общий парсер для сделок с акциями и облигациями"""
-    if trade_type == "stock":
-        # Собираем дату и время совершения сделки
-        date_part = row[11]
-        time_part = row[12]
-        trade_datetime = None
-        if isinstance(date_part, str) and isinstance(time_part, str):
-            trade_datetime = f"{date_part.strip()} {time_part.strip()}"
+    is_buy = bool(row[3])
+    price = row[4] if is_buy else row[7 if trade_type == "stock" else 8]
+    quantity = row[3] if is_buy else row[6 if trade_type == "stock" else 7]
+    payment = row[5] if is_buy else row[8 if trade_type == "stock" else 9]
+    currency = row[10 if trade_type == "stock" else 11]
+    comment = str(row[17 if trade_type == "stock" else 18]).strip() if len(row) > (17 if trade_type == "stock" else 18) else ""
+    operation_id = str(row[1]).strip() if row[1] else None
+    date = f"{row[11]} {row[12]}" if trade_type == "stock" and isinstance(row[11], str) and isinstance(row[12], str) else row[13]
 
-        trade_data = {
-            "ticker": ticker,
-            "isin": isin,
-            "operation_id": str(row[1]).strip() if row[1] else None,
-            "date": trade_datetime,
-            "operation_type": "buy" if row[3] else "sell",
-            "quantity": row[3] if row[3] else row[6],
-            "price": row[4] if row[3] else row[7],
-            "amount": row[5] if row[3] else row[8],
-            "currency": row[10],
-            "comment": str(row[17]).strip() if len(row) > 17 and row[17] else ""
-        }
-        return trade_data
+    return {
+        "date": date,
+        "operation_type": "buy" if is_buy else "sell",
+        "payment_sum": payment,
+        "currency": currency,
+        "ticker": ticker,
+        "isin": isin if trade_type == "stock" else ticker,
+        "price": price,
+        "quantity": quantity,
+        "aci": "" if trade_type == "stock" else (row[6] or row[10]),
+        "comment": comment,
+        "operation_id": operation_id,
+    }
 
-    elif trade_type == "bond":
-        # Обрабатываем сделки с облигациями
-        trade_data = {
-            "date": row[13],
-            "ticker": ticker,
-            "operation_type": "buy" if row[3] else "sell",
-            "quantity": row[3] if row[3] else row[7],
-            "price": row[4] if row[3] else row[8],
-            "amount": row[5] if row[3] else row[9],
-            "currency": row[11],
-            "comment": str(row[18]).strip() if len(row) > 18 and row[18] else ""
-        }
-
-    return trade_data
-
-
-filepath = "1.xls"  # здесь указываешь путь к файлу
+# Пример использования
+filepath = "2.xls"  # указываете путь к вашему файлу
 result = parse_trades(filepath)
 print(json.dumps(result, ensure_ascii=False, indent=2))

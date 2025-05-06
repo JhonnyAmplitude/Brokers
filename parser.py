@@ -1,3 +1,4 @@
+import json
 import os
 import re
 from datetime import datetime
@@ -6,13 +7,12 @@ from typing import Any, Generator, List, Dict, Optional, Tuple, Union
 import xlrd
 import openpyxl
 
-FILE_PATH = "1.xls"
+FILE_PATH = "6.xls"
 
-# --- Константы и справочники ---
 
 VALID_OPERATIONS = {
     "Проценты по займам \"овернайт ЦБ\"", "Приход ДС", "Проценты по займам \"овернайт\"",
-    "Покупка/Продажа", "НКД от операций", "Погашение купона", "Вознаграждение компании",
+    "Погашение купона", "Вознаграждение компании",
     "Переводы между площадками", "Дивиденды", "Покупка/Продажа (репо)",
     "Частичное погашение облигации", "Погашение облигации", "Вывод ДС", "НДФЛ",
 }
@@ -38,8 +38,14 @@ SPECIAL_OPERATION_HANDLERS = {
 }
 
 
-# --- Вспомогательные функции ---
+currency_dict = {
+    "SEK": "SEK", "NOK": "NOK", "AED": "AED", "XAG": "XAG", "ZAR": "ZAR",
+    "TRY": "TRY", "XAU": "XAU", "HKD": "HKD", "TJS": "TJS", "UZS": "UZS",
+    "KGS": "KGS", "KZT": "KZT", "JPY": "JPY", "AMD": "AMD", "Рубль": "RUB",
+    "USD": "USD", "EUR": "EUR", "BYN": "BYN", "GBP": "GBP", "CHF": "CHF", "CNY": "CNY"
+}
 
+# --- Вспомогательные функции ---
 def is_nonzero(value: Any) -> bool:
     try:
         return float(str(value).replace(",", ".").replace(" ", "")) != 0
@@ -114,7 +120,7 @@ def get_rows_from_file(file_path: str) -> Generator[List[Any], None, None]:
 
 
 # --- Основной парсер ---
-def process_operation_row(row: List[Any], currency: str) -> Optional[Dict[str, Any]]:
+def process_operation_row(row: List[Any], currency: str, stock_mode: bool, ticker: str, operation_id: str) -> Optional[Dict[str, Any]]:
     date = parse_date(row[1])
     if not date:
         return None
@@ -128,34 +134,51 @@ def process_operation_row(row: List[Any], currency: str) -> Optional[Dict[str, A
     payment_sum = income if is_nonzero(income) else expense
     comment = extract_note(row)
 
+    # Восстановление старой логики для типа операции
     operation_type = OPERATION_TYPE_MAP.get(operation, "")
     if handler := SPECIAL_OPERATION_HANDLERS.get(operation):
         operation_type = handler(income, expense)
 
+    # Определение типа операции на основе текста (Покупка/Продажа)
+    if "Покупка" in operation:
+        operation_type = "buy"
+    elif "Продажа" in operation:
+        operation_type = "sell"
+
+    # Используем currency_dict для получения валюты
+    currency_value = currency_dict.get(currency, currency)  # Если валюты нет в словаре, возвращаем саму валюту как есть
+
+    # Получаем цену, количество и ACI (если applicable)
+    price = safe_float(row[8])  # или другая колонка, если цена в другом месте
+    quantity = safe_float(row[9])  # или другая колонка, если количество в другом месте
+
+    # Собираем итоговую запись в словарь
     entry = {
         "date": date,
-        "operation": operation,
-        "operation_type": operation_type,
-        "currency": currency,
-        "comment": comment,
+        "operation_type": operation_type,  # Возвращаем тип операции
         "payment_sum": payment_sum,
+        "currency": currency_value,
+        "ticker": ticker,
+        "isin": extract_isin(comment) if not stock_mode else ticker,
+        "price": price,
+        "quantity": quantity,
+        "aci": "" if stock_mode else (row[6] or row[10]),  # Проверка на stock_mode для ACI
+        "comment": comment,
+        "operation_id": operation_id,
     }
-
-    if operation == "Погашение купона":
-        entry["isin"] = extract_isin(comment)
-    elif operation == "Дивиденды":
-        entry.update(extract_dividend_details(comment))
 
     return entry
 
 
 # --- Основной парсер ---
-
 def parse_rows(rows: Generator[List[Any], None, None]) -> Tuple[Dict[str, Optional[str]], List[Dict[str, Any]]]:
     header_data = {"account_id": None, "account_date_start": None, "date_start": None, "date_end": None}
     operations = []
     currency = None
     parsing = False
+    stock_mode = False  # Пример: определите, если нужно
+    ticker = ""  # Пример: извлеките или задайте тикер, если необходимо
+    operation_id = ""  # Пример: получите или задайте ID операции, если необходимо
 
     for row in rows:
         row_str = " ".join(str(cell) for cell in row[1:] if cell).strip()
@@ -194,14 +217,13 @@ def parse_rows(rows: Generator[List[Any], None, None]) -> Tuple[Dict[str, Option
             continue
 
         elif parsing:
-            entry = process_operation_row(row, currency)
+            # Передаем дополнительные аргументы в process_operation_row
+            entry = process_operation_row(row, currency, stock_mode, ticker, operation_id)
             if entry:
                 operations.append(entry)
 
-    # Логируем значения для отладки
-    print("account_date_start:", header_data["account_date_start"])
-
     return header_data, operations
+
 
 def safe_float(value):
     try:
@@ -210,78 +232,14 @@ def safe_float(value):
         return None
 
 
-def parse_stock_row(row, isin, name, reg_number):
-    return {
-        "date": row[1],
-        "number": row[2],
-        "quantity": float(row[4]),
-        "price": float(row[5]),
-        "payment": float(row[6]),
-        "isin": isin,
-        "name": name,
-        "reg_number": reg_number
-    }
+rows = list(get_rows_from_file(FILE_PATH))
+header_data, operations = parse_rows(rows)
+result = {
+    **header_data,
+    "operations": operations,
+}
 
-def parse_bond_row(row, isin, name, reg_number):
-    return {
-        "date": row[1],
-        "number": row[2],
-        "quantity": float(row[4]),
-        "price": float(row[5]),
-        "payment": float(row[6]),
-        "nkd_purchase": float(row[7]),
-        "isin": isin,
-        "name": name,
-        "reg_number": reg_number
-    }
-
-
-def parse_deals_block(block_rows):
-    deals = []
-    current_type = None  # "stocks" или "bonds"
-    reg_number = None
-    isin = None
-    name = None
-
-    for row in block_rows:
-        row_str = [str(cell) for cell in row]
-
-        # Извлечение номера регистрации и ISIN
-        if any("Номер рег." in cell for cell in row_str):
-            for i, cell in enumerate(row_str):
-                if "Номер рег." in cell:
-                    reg_number = row_str[i + 1].strip()
-                elif "ISIN" in cell:
-                    isin = row_str[i + 1].strip()
-                elif "Общество" in cell or "Публичное" in cell:
-                    name = cell.strip()
-            continue
-
-        # Проверка на наличие "Акция" или "Облигация"
-        if any("Облигация" in cell for cell in row_str):
-            current_type = "bonds"
-            continue
-        if any("Акция" in cell for cell in row_str):
-            current_type = "stocks"
-            continue
-
-        # Пропускаем пустые строки или строки без данных
-        if not any(row_str):
-            continue
-
-        # Обработка данных по сделкам
-        try:
-            if current_type == "bonds":
-                deal = parse_bond_row(row_str, isin, name, reg_number)
-            elif current_type == "stocks":
-                deal = parse_stock_row(row_str, isin, name, reg_number)
-            else:
-                continue  # Пропускаем строки, которые не относятся к акциям или облигациям
-            deals.append(deal)
-        except Exception as e:
-            print(f"⚠️ Ошибка при парсинге сделки: {row_str} → {e}")
-
-    return deals
+print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 

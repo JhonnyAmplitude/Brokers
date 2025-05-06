@@ -282,6 +282,6 @@ def parse_full_statement(filepath: str) -> dict:
 
 
 # --- Запуск ---
-filepath = "1.xls"  # Путь к файлу
+filepath = "2.xls"  # Путь к файлу
 result = parse_full_statement(filepath)
 print(json.dumps(result, ensure_ascii=False, indent=2))
