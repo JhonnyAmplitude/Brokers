@@ -1,47 +1,25 @@
-# --- Импорт и глобальные переменные ---
 from typing import List, Optional, Any, Dict
-from dataclasses import dataclass
 from datetime import datetime
 import openpyxl
 import xlrd
 import os
 import re
-import json
 
-
-CURRENCY_DICT = {
-    "SEK": "SEK", "NOK": "NOK", "AED": "AED", "XAG": "XAG", "ZAR": "ZAR",
-    "TRY": "TRY", "XAU": "XAU", "HKD": "HKD", "TJS": "TJS", "UZS": "UZS",
-    "KGS": "KGS", "KZT": "KZT", "JPY": "JPY", "AMD": "AMD", "РУБЛЬ": "RUB",
-    "RUR": "RUB", "RUB": "RUB", "USD": "USD", "EUR": "EUR", "BYN": "BYN",
-    "GBP": "GBP", "CHF": "CHF", "CNY": "CNY"
-}
-
-@dataclass
-class OperationDTO:
-    date: str
-    operation_type: str
-    payment_sum: float
-    currency: str
-    ticker: str
-    isin: Optional[str]
-    price: float
-    quantity: int
-    aci: Optional[float]
-    comment: str
-    operation_id: Optional[str]
-    _sort_key: Optional[str] = None
+from OperationDTO import OperationDTO
+from constatns import CURRENCY_DICT
 
 
 # --- Вспомогательные функции ---
 def read_excel_file(filepath: str, file_ext: str) -> List[List[Any]]:
-    if file_ext == '.xlsx':
-        sheet = openpyxl.load_workbook(filepath, data_only=True).active
-        return list(sheet.iter_rows(values_only=True))
-    elif file_ext == '.xls':
-        sheet = xlrd.open_workbook(filepath).sheet_by_index(0)
-        return [sheet.row_values(i) for i in range(sheet.nrows)]
-    raise ValueError(f"Неподдерживаемый формат файла: {file_ext}")
+    try:
+        if file_ext == '.xlsx':
+            sheet = openpyxl.load_workbook(filepath, data_only=True).active
+            return list(sheet.iter_rows(values_only=True))
+        elif file_ext == '.xls':
+            sheet = xlrd.open_workbook(filepath).sheet_by_index(0)
+            return [sheet.row_values(i) for i in range(sheet.nrows)]
+    except Exception as e:
+        raise ValueError(f"Неподдерживаемый формат файла: {file_ext}")
 
 def normalize_currency(value: Any) -> str:
     value = str(value).strip().upper() if value else ""
@@ -136,17 +114,15 @@ def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str
         payment_sum=payment,
         currency=currency,
         ticker=ticker,
-        isin=isin if stock_mode else ticker,
+        isin=isin,
         price=price,
         quantity=int(quantity),
         aci=aci,
         comment=comment,
         operation_id=operation_id,
-        _sort_key=full_date
     )
 
 
-# --- Основной парсинг ---
 def parse_trades(filepath: str) -> List[Dict[str, Any]]:
     file_ext = os.path.splitext(filepath)[1].lower()
     rows = read_excel_file(filepath, file_ext)
@@ -189,6 +165,4 @@ def parse_trades(filepath: str) -> List[Dict[str, Any]]:
             for op in sorted(result, key=lambda x: (x._sort_key is None, x._sort_key))]
 
 
-filepath = "2.xls"
-trades = parse_trades(filepath)
-print(json.dumps(trades, ensure_ascii=False, indent=2))
+
