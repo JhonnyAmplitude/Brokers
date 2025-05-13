@@ -3,7 +3,7 @@ from typing import Any
 VALID_OPERATIONS = {
     "Проценты по займам \"овернайт ЦБ\"", "Приход ДС", "Проценты по займам \"овернайт\"",
     "Погашение купона", "Вознаграждение компании",
-    "Переводы между площадками", "Дивиденды", "Покупка/Продажа (репо)",
+    "Переводы между площадками", "Дивиденды",
     "Частичное погашение облигации", "Погашение облигации", "Вывод ДС", "НДФЛ",
 }
 
@@ -31,7 +31,7 @@ SPECIAL_OPERATION_HANDLERS = {
 CURRENCY_DICT = {
     "SEK": "SEK", "NOK": "NOK", "AED": "AED", "XAG": "XAG", "ZAR": "ZAR",
     "TRY": "TRY", "XAU": "XAU", "HKD": "HKD", "TJS": "TJS", "UZS": "UZS",
-    "KGS": "KGS", "KZT": "KZT", "JPY": "JPY", "AMD": "AMD", "Рубль": "RUB",
+    "KGS": "KGS", "KZT": "KZT", "JPY": "JPY", "AMD": "AMD", "РУБЛЬ": "RUB", "Рубль":"RUB",
     "USD": "USD", "EUR": "EUR", "BYN": "BYN", "GBP": "GBP", "CHF": "CHF", "CNY": "CNY"
 }
 

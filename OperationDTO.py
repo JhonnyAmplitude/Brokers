@@ -10,7 +10,7 @@ class OperationDTO:
     ticker: Optional[str]
     isin: Optional[str]
     price: Optional[float]
-    quantity: Optional[float]
+    quantity: Optional[int]
     aci: Optional[Union[str, float]]
     comment: Optional[str]
     operation_id: Optional[str]

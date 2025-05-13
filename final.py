@@ -136,7 +136,7 @@ def process_operation_row(
         payment_sum=payment_sum,
         currency=currency_value,
         ticker=ticker,
-        isin=extract_isin(comment) if not stock_mode else ticker,
+        isin=extract_isin(comment),
         price=price,
         quantity=quantity,
         aci=aci,
@@ -176,12 +176,9 @@ def is_table_header(row_str: str) -> bool:
 def parse_financial_operations(
     rows: Generator[List[Any], None, None]
 ) -> Tuple[Dict[str, Optional[str]], List[OperationDTO]]:
-    """
-    Разбор финансовых операций из строк Excel.
-    """
     header_data = {"account_id": None, "account_date_start": None, "date_start": None, "date_end": None}
     operations = []
-    currency = None
+    current_currency = None
     parsing = False
     stock_mode = False
     ticker = ""
@@ -193,18 +190,26 @@ def parse_financial_operations(
         if not row_str:
             continue
 
+        if row_str in CURRENCY_DICT:
+            current_currency = row_str
+            continue
+
         if is_table_header(row_str):
             parsing = True
             continue
 
         if not parsing:
-            if row_str in CURRENCY_DICT:
-                currency = row_str
-            else:
-                parse_header_data(row_str, header_data)
+            parse_header_data(row_str, header_data)
             continue
 
-        entry = process_operation_row(row, currency, stock_mode, ticker, operation_id)
+        operation = str(get_cell(row, 2)).strip()
+        if operation in SKIP_OPERATIONS:
+            continue
+
+        if operation not in VALID_OPERATIONS:
+            continue
+
+        entry = process_operation_row(row, current_currency, stock_mode, ticker, operation_id)
         if entry:
             operations.append(entry)
 
@@ -218,7 +223,7 @@ def parse_full_statement(file_path: str) -> Dict[str, Any]:
 
     operations = financial_operations + trade_operations
 
-    # Явно указываем порядок: сначала заголовок, затем операции
+    # Указываем порядок возвращаемого результата.
     return {
         "account_id": header_data.get("account_id"),
         "account_date_start": header_data.get("account_date_start"),
@@ -234,5 +239,5 @@ def default_operation_dto(obj):
     raise TypeError(f"Тип {obj.__class__.__name__} не сериализуем")
 
 
-result = parse_full_statement("penis.xls")  # Убедись, что путь верный
+result = parse_full_statement("1.xls")
 print(json.dumps(result, ensure_ascii=False, indent=2, default=default_operation_dto))
