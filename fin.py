@@ -1,23 +1,13 @@
-from typing import List, Optional, Any, Dict
-from datetime import datetime
-import openpyxl
-import xlrd
-import os
 import re
+from datetime import datetime
+from typing import Any, List, Optional
+
+import xlrd
 
 from OperationDTO import OperationDTO
 from constatns import CURRENCY_DICT
+from utils import extract_rows
 
-def read_excel_file(filepath: str, file_ext: str) -> List[List[Any]]:
-    try:
-        if file_ext == '.xlsx':
-            sheet = openpyxl.load_workbook(filepath, data_only=True).active
-            return [list(row) for row in sheet.iter_rows(values_only=True)]
-        elif file_ext == '.xls':
-            sheet = xlrd.open_workbook(filepath).sheet_by_index(0)
-            return [sheet.row_values(i) for i in range(sheet.nrows)]
-    except Exception:
-        raise ValueError(f"Неподдерживаемый формат файла: {file_ext}")
 
 def normalize_currency(value: Any) -> str:
     value = str(value).strip().upper() if value else ""
@@ -109,9 +99,6 @@ def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str
     trade_time = parse_time(row[12]) if stock_mode else "00:00:00"
     full_date = f"{trade_date} {trade_time}" if trade_date else None
 
-    sort_key = full_date
-
-
     return OperationDTO(
         date=full_date or "",
         operation_type="buy" if is_buy else "sell",
@@ -124,7 +111,6 @@ def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str
         aci=aci,
         comment=comment,
         operation_id=operation_id,
-        _sort_key=sort_key
     )
 
 def parse_currency_trade(row: List[Any], ticker: str, currency_hint: Optional[str]) -> OperationDTO:
@@ -136,8 +122,6 @@ def parse_currency_trade(row: List[Any], ticker: str, currency_hint: Optional[st
     trade_time = parse_time(row[10])
     operation_id = str(row[1]).strip() if row[1] else None
     full_date = f"{trade_date} {trade_time}" if trade_date else ""
-
-    sort_key = full_date
 
     return OperationDTO(
         date=full_date,
@@ -151,13 +135,10 @@ def parse_currency_trade(row: List[Any], ticker: str, currency_hint: Optional[st
         aci=None,
         comment="",
         operation_id=operation_id,
-        _sort_key=sort_key
-
     )
 
-def parse_trades(filepath: str) -> List[Dict[str, Any]]:
-    file_ext = os.path.splitext(filepath)[1].lower()
-    rows = read_excel_file(filepath, file_ext)
+def parse_trades(filepath: str) -> List[OperationDTO]:
+    rows = list(extract_rows(filepath))
 
     result = []
     current_ticker = current_isin = current_currency = None
@@ -199,6 +180,5 @@ def parse_trades(filepath: str) -> List[Dict[str, Any]]:
                 dto = parse_trade(row, trade_type, current_ticker, current_isin)
             result.append(dto)
 
-    return [dict((k, v) for k, v in op.__dict__.items() if not k.startswith("_"))
-            for op in sorted(result, key=lambda x: (x._sort_key is None, x._sort_key))]
+    return result
 

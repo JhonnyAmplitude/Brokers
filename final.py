@@ -1,17 +1,24 @@
 import json
 import os
 import re
+
 from datetime import datetime
-from typing import Any, Generator, List, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
-
-import xlrd
 import openpyxl
+import xlrd
 
-from constatns import SPECIAL_OPERATION_HANDLERS, OPERATION_TYPE_MAP, VALID_OPERATIONS, SKIP_OPERATIONS, CURRENCY_DICT, \
-    is_nonzero
-from fin import  parse_trades
 from OperationDTO import OperationDTO
+from constatns import (
+    CURRENCY_DICT,
+    OPERATION_TYPE_MAP,
+    SKIP_OPERATIONS,
+    SPECIAL_OPERATION_HANDLERS,
+    VALID_OPERATIONS,
+    is_nonzero,
+)
+from fin import parse_trades
+from utils import parse_date
 
 
 def extract_isin(comment: str) -> Optional[str]:
@@ -28,26 +35,6 @@ def extract_note(row: List[Any]) -> str:
     NOTE_COLUMNS = slice(14, 19)
     return " ".join(str(cell).strip() for cell in row[NOTE_COLUMNS] if cell)
 
-def parse_date(date_str: Union[str, int, float]) -> Optional[str]:
-    """
-    Преобразование строки или числа в формат даты ISO.
-    """
-    if not date_str:
-        return None
-    if isinstance(date_str, (int, float)):
-        try:
-            return datetime(*xlrd.xldate_as_tuple(date_str, 0)).date().isoformat()
-        except Exception:
-            return None
-
-    date_str = str(date_str).strip()
-    for fmt in ("%d.%m.%Y", "%d.%m.%y"):
-        try:
-            return datetime.strptime(date_str, fmt).date().isoformat()
-        except ValueError:
-            continue
-    return None
-
 def safe_float(value: Any) -> Optional[float]:
     """
     Преобразование значения в float с безопасной обработкой ошибок.
@@ -57,9 +44,10 @@ def safe_float(value: Any) -> Optional[float]:
     except (ValueError, TypeError):
         return None
 
-def get_rows_from_file(file_path: str) -> Generator[List[Any], None, None]:
+def extract_rows(file_path: str) -> Generator[List[Any], None, None]:
     """
     Чтение строк из файла Excel (форматы .xls или .xlsx).
+    Поддерживает как чтение из файлов, так и чтение из байтовых данных.
     """
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".xls":
@@ -72,6 +60,7 @@ def get_rows_from_file(file_path: str) -> Generator[List[Any], None, None]:
             yield list(row)
     else:
         raise ValueError("Неподдерживаемый формат файла")
+
 
 def detect_operation_type(op: str, income: str, expense: str) -> str:
     """
@@ -120,7 +109,6 @@ def process_operation_row(
 
     comment = extract_note(row)
     operation_type = detect_operation_type(operation, income, expense)
-
     currency_value = CURRENCY_DICT.get(currency, currency)
 
     price = safe_float(get_cell(row, 8))
@@ -141,8 +129,9 @@ def process_operation_row(
         quantity=quantity,
         aci=aci,
         comment=comment,
-        operation_id=operation_id,
+        operation_id=operation_id
     )
+
 
 
 def parse_header_data(row_str: str, header_data: Dict[str, Optional[str]]) -> None:
@@ -217,19 +206,26 @@ def parse_financial_operations(
 
 
 def parse_full_statement(file_path: str) -> Dict[str, Any]:
-    rows = list(get_rows_from_file(file_path))  # Получаем все строки из файла
-    header_data, financial_operations = parse_financial_operations(iter(rows))  # Обрабатываем финансовые операции
-    trade_operations = parse_trades(file_path)  # Путь к файлу
-
+    rows = list(extract_rows(file_path))
+    header_data, financial_operations = parse_financial_operations(iter(rows))
+    trade_operations = parse_trades(file_path)
     operations = financial_operations + trade_operations
 
-    # Указываем порядок возвращаемого результата.
+    # Сортируем до сериализации
+    operations.sort(key=lambda op: (op._sort_key is None, op._sort_key))
+
+    # Превращаем в dict перед отдачей
+    operations_dict = [
+        {k: v for k, v in op.__dict__.items() if not k.startswith("_")}
+        for op in operations
+    ]
+
     return {
         "account_id": header_data.get("account_id"),
         "account_date_start": header_data.get("account_date_start"),
         "date_start": header_data.get("date_start"),
         "date_end": header_data.get("date_end"),
-        "operations": operations,
+        "operations": operations_dict,
     }
 
 
@@ -239,5 +235,5 @@ def default_operation_dto(obj):
     raise TypeError(f"Тип {obj.__class__.__name__} не сериализуем")
 
 
-result = parse_full_statement("1.xls")
+result = parse_full_statement("pensil.XLSX")
 print(json.dumps(result, ensure_ascii=False, indent=2, default=default_operation_dto))

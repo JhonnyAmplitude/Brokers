@@ -10,20 +10,6 @@ from OperationDTO import OperationDTO
 
 app = FastAPI()
 
-def extract_rows(file_bytes: bytes, file_extension: str):
-    if file_extension == ".xls":
-        wb = xlrd.open_workbook(file_contents=file_bytes)
-        sheet = wb.sheet_by_index(0)
-        for row_idx in range(sheet.nrows):
-            yield sheet.row_values(row_idx)
-    elif file_extension == ".xlsx":
-        wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-        sheet = wb.active
-        for row in sheet.iter_rows(values_only=True):
-            yield list(row)
-    else:
-        raise HTTPException(status_code=400, detail="Неподдерживаемый формат файла")
-
 @app.post("/parse-financial-operations")
 async def upload_file(file: UploadFile = File(...)):
     file_extension = file.filename.split('.')[-1].lower()
