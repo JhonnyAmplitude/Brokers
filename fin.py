@@ -1,17 +1,18 @@
 import re
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 import xlrd
 
 from OperationDTO import OperationDTO
-from constatns import CURRENCY_DICT
-from utils import extract_rows
+from constatns import CURRENCY_DICT, TRADE_TYPE_CONFIG
+from utils import extract_rows, normalize_str
 
 
 def normalize_currency(value: Any) -> str:
     value = str(value).strip().upper() if value else ""
     return CURRENCY_DICT.get(value, value)
+
 
 def parse_date(value: Any) -> Optional[str]:
     if isinstance(value, datetime):
@@ -30,41 +31,55 @@ def parse_date(value: Any) -> Optional[str]:
                 continue
     return None
 
+
 def parse_time(value: Any) -> str:
     if isinstance(value, datetime):
         return value.strftime("%H:%M:%S")
     if isinstance(value, (int, float)):
         try:
-            return datetime(*xlrd.xldate_as_tuple(value, 0)).time().strftime("%H:%M:%S")
+            return datetime(*xlrd.xldate_as_tuple(value, 0)).strftime("%H:%M:%S")
         except Exception:
             return "00:00:00"
     if isinstance(value, str):
         for fmt in ("%H:%M:%S", "%H:%M"):
             try:
-                return datetime.strptime(value.strip(), fmt).time().strftime("%H:%M:%S")
+                return datetime.strptime(value.strip(), fmt).strftime("%H:%M:%S")
             except ValueError:
                 continue
     return "00:00:00"
 
-def detect_new_ticker(row: List[Any]) -> bool:
-    return any(isinstance(cell, str) and "isin" in cell.lower() for cell in row)
+
+def is_ticker_row(row: List[Any]) -> bool:
+    return (
+        any(isinstance(cell, str) and "isin" in cell.lower() for cell in row) or
+        (isinstance(row[0], str) and re.match(r"^[A-Z]{3,}(_)?[A-Z]{3,}", row[0]) and all(not cell for cell in row[1:]))
+    )
+
 
 def extract_ticker(row: List[Any]) -> Optional[str]:
-    return str(row[0]).split()[0].strip() if row and isinstance(row[0], str) else None
+    if row and isinstance(row[0], str):
+        ticker = row[0].strip()
+        if re.match(r"^[A-Z]{3,}(_)?[A-Z]{3,}", ticker):
+            return ticker
+        return ticker.split()[0]
+    return ""
+
 
 def extract_isin(row: List[Any]) -> Optional[str]:
     for i, cell in enumerate(row):
         if isinstance(cell, str) and "isin" in cell.lower():
-            match = re.search(r"ISIN:\s*([A-Z0-9]+)", cell)
+            match = re.search(r"ISIN[:\s]*([A-Z0-9]{12})", cell)
             if match:
                 return match.group(1)
             next_cell = row[i + 1] if i + 1 < len(row) else ""
             if isinstance(next_cell, str) and re.match(r"^[A-Z0-9]{12}$", next_cell.strip()):
                 return next_cell.strip()
-    return None
+    return ""
+
 
 def is_section_start(row: List[Any], keywords: List[str]) -> bool:
     return any(keyword in str(cell).lower() for cell in row if cell for keyword in keywords)
+
 
 def is_valid_trade_row(row: List[Any]) -> bool:
     if not row or not row[0]:
@@ -73,39 +88,85 @@ def is_valid_trade_row(row: List[Any]) -> bool:
         return False
     return any(isinstance(cell, (int, float)) for cell in row)
 
-def safe_get(row: List[Any], idx: int, default=None) -> Any:
+
+def safe_get(row: List[Any], idx: Optional[int], default=None):
+    if idx is None or not isinstance(idx, int):
+        return default
     return row[idx] if idx < len(row) else default
 
-def extract_currency_from_row(row: List[Any]) -> Optional[str]:
-    for i, cell in enumerate(row):
-        if isinstance(cell, str) and "сопряж" in cell.lower():
-            for j in range(i + 1, len(row)):
-                candidate = row[j]
-                if isinstance(candidate, str) and candidate.strip():
-                    return normalize_currency(candidate)
-    return None
 
-def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str]) -> OperationDTO:
+
+def to_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def extract_currency_pair_from_row(row: List[Any]) -> Tuple[Optional[str], Optional[str]]:
+    lot_currency = ""
+    pair_currency = ""
+
+    for i, cell in enumerate(row):
+        if isinstance(cell, str):
+            cell_low = cell.lower()
+            if "валюта лота" in cell_low:
+                lot_currency = next_non_empty_str(row, i)
+            elif "сопряж" in cell_low:
+                pair_currency = next_non_empty_str(row, i)
+
+    if lot_currency and pair_currency:
+        ticker = f"{lot_currency}{pair_currency}"
+        return ticker, pair_currency
+    return "", ""
+
+
+def next_non_empty_str(row: List[Any], start_idx: int) -> str:
+    for j in range(start_idx + 1, len(row)):
+        nxt = row[j]
+        if isinstance(nxt, str) and nxt.strip():
+            return normalize_currency(nxt)
+    return ""
+
+
+def get_operation_type(config: dict, is_buy: bool) -> str:
+    if config["is_currency"]:
+        return "currency_buy" if is_buy else "currency_sale"
+    return "buy" if is_buy else "sale"
+
+
+def parse_trade_row(
+    row: List[Any],
+    trade_type: str,
+    ticker: str,
+    currency_hint: Optional[str],
+    isin: Optional[str] = ""
+) -> OperationDTO:
     is_buy = bool(row[3])
-    stock_mode = trade_type == "stock"
-    price = row[4] if is_buy else row[7 if stock_mode else 8]
-    quantity = row[3] if is_buy else row[6 if stock_mode else 7]
-    payment = row[5] if is_buy else row[8 if stock_mode else 9]
-    currency = normalize_currency(row[10 if stock_mode else 11])
-    comment = str(safe_get(row, 17 if stock_mode else 18, "")).strip()
-    operation_id = str(row[1]).strip() if row[1] else None
-    aci = safe_get(row, 6) or safe_get(row, 10) if not stock_mode else None
-    trade_date = parse_date(row[11 if stock_mode else 13])
-    trade_time = parse_time(row[12]) if stock_mode else "00:00:00"
-    full_date = f"{trade_date} {trade_time}" if trade_date else None
+    config = TRADE_TYPE_CONFIG[trade_type]
+    operation = "buy" if is_buy else "sale"
+    indexes = config["indexes"][operation]
+
+    price = to_float(safe_get(row, indexes["price"]))
+    quantity = to_float(safe_get(row, indexes["quantity"]))
+    payment = to_float(safe_get(row, indexes["payment"]))
+
+    trade_date = parse_date(safe_get(row, indexes.get("date", "")))
+    trade_time = parse_time(safe_get(row, indexes.get("time", "")))
+    currency = normalize_currency(safe_get(row, indexes.get("currency"))) if indexes.get("currency") else currency_hint
+    comment = normalize_str(safe_get(row, indexes.get("comment", ""), "")) if indexes.get("comment") else ""
+    aci = to_float(safe_get(row, indexes.get("aci", ""), 0.0)) if trade_type == "bond" else 0.0
+    operation_id = str(safe_get(row, 1, "")).strip()
+
+    full_date = f"{trade_date} {trade_time}" if trade_date else ""
 
     return OperationDTO(
-        date=full_date or "",
-        operation_type="buy" if is_buy else "sell",
+        date=full_date,
+        operation_type=get_operation_type(config, is_buy),
         payment_sum=payment,
         currency=currency,
-        ticker=ticker,
-        isin=isin,
+        ticker=normalize_str(ticker),
+        isin="" if config["is_currency"] else isin,
         price=price,
         quantity=int(quantity),
         aci=aci,
@@ -113,36 +174,20 @@ def parse_trade(row: List[Any], trade_type: str, ticker: str, isin: Optional[str
         operation_id=operation_id,
     )
 
-def parse_currency_trade(row: List[Any], ticker: str, currency_hint: Optional[str]) -> OperationDTO:
-    is_buy = bool(row[3])
-    price = row[3] if is_buy else row[6]
-    quantity = row[4] if is_buy else row[7]
-    payment = row[5] if is_buy else row[8]
-    trade_date = parse_date(row[9])
-    trade_time = parse_time(row[10])
-    operation_id = str(row[1]).strip() if row[1] else None
-    full_date = f"{trade_date} {trade_time}" if trade_date else ""
 
-    return OperationDTO(
-        date=full_date,
-        operation_type="buy" if is_buy else "sell",
-        payment_sum=payment,
-        currency=currency_hint,
-        ticker=ticker,
-        isin=None,
-        price=price,
-        quantity=int(quantity),
-        aci=None,
-        comment="",
-        operation_id=operation_id,
-    )
+SECTION_KEYWORDS = {
+    "stock": ["акция", "адр"],
+    "bond": ["облигация"],
+    "currency": ["иностранная валюта"]
+}
+
 
 def parse_trades(filepath: str) -> List[OperationDTO]:
     rows = list(extract_rows(filepath))
 
     result = []
     current_ticker = current_isin = current_currency = None
-    current_section = None  # 'stock', 'bond', 'currency'
+    current_section = None
     parsing_trades = False
 
     for row in rows:
@@ -154,31 +199,31 @@ def parse_trades(filepath: str) -> List[OperationDTO]:
                 parsing_trades = True
             continue
 
-        if detect_new_ticker(row):
+        if is_ticker_row(row):
             current_ticker = extract_ticker(row)
             current_isin = extract_isin(row)
             continue
 
-        if is_section_start(row, ["акция", "адр"]):
-            current_section = 'stock'; continue
-        if is_section_start(row, ["облигация"]):
-            current_section = 'bond'; continue
-        if is_section_start(row, ["иностранная валюта"]):
-            current_section = 'currency'; continue
+        for section, keywords in SECTION_KEYWORDS.items():
+            if is_section_start(row, keywords):
+                current_section = section
+                break
+
         if is_section_start(row, ["заем", "овернайт", "цб"]):
             break
 
         if current_section == 'currency' and any("сопряж" in str(cell).lower() for cell in row):
-            current_currency = extract_currency_from_row(row)
+            current_ticker, current_currency = extract_currency_pair_from_row(row)
             continue
 
         if is_valid_trade_row(row):
-            if current_section == 'currency':
-                dto = parse_currency_trade(row, current_ticker, current_currency)
-            else:
-                trade_type = "stock" if current_section == 'stock' else "bond"
-                dto = parse_trade(row, trade_type, current_ticker, current_isin)
+            dto = parse_trade_row(
+                row=row,
+                trade_type=current_section,
+                ticker=current_ticker,
+                currency_hint=current_currency,
+                isin=current_isin
+            )
             result.append(dto)
 
     return result
-

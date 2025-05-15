@@ -56,3 +56,17 @@ def parse_date(value: Any) -> Optional[str]:
                 continue
 
     return None
+
+
+def normalize_str(value: Any) -> str:
+    s = str(value).strip() if value is not None else ""
+    return "" if s.lower() == "none" else s
+
+def is_nonzero(value: Any) -> bool:
+    """
+    Проверка на значение, отличное от нуля.
+    """
+    try:
+        return float(str(value).replace(",", ".").replace(" ", "")) != 0
+    except (ValueError, TypeError):
+        return False

@@ -1,12 +1,7 @@
 import json
-import os
 import re
-
 from datetime import datetime
 from typing import Any, Dict, Generator, List, Optional, Tuple
-
-import openpyxl
-import xlrd
 
 from OperationDTO import OperationDTO
 from constatns import (
@@ -18,54 +13,31 @@ from constatns import (
     is_nonzero,
 )
 from fin import parse_trades
-from utils import parse_date
+from utils import parse_date, extract_rows
 
 
 def extract_isin(comment: str) -> Optional[str]:
-    """
-    Извлечение ISIN из комментария.
-    """
     match = re.search(r'\b[A-Z]{2}[A-Z0-9]{10}\b', comment)
-    return match.group(0) if match else None
+    return match.group(0) if match else ""
+
 
 def extract_note(row: List[Any]) -> str:
-    """
-    Извлечение заметки из строки.
-    """
     NOTE_COLUMNS = slice(14, 19)
-    return " ".join(str(cell).strip() for cell in row[NOTE_COLUMNS] if cell)
+    return " ".join(str(cell).strip() for cell in row[NOTE_COLUMNS] if cell and str(cell).strip())
 
-def safe_float(value: Any) -> Optional[float]:
-    """
-    Преобразование значения в float с безопасной обработкой ошибок.
-    """
+
+def safe_float(value: Any) -> float:
+    if value is None:
+        return 0.0
     try:
         return float(str(value).replace(',', '.'))
     except (ValueError, TypeError):
-        return None
-
-def extract_rows(file_path: str) -> Generator[List[Any], None, None]:
-    """
-    Чтение строк из файла Excel (форматы .xls или .xlsx).
-    Поддерживает как чтение из файлов, так и чтение из байтовых данных.
-    """
-    ext = os.path.splitext(file_path)[1].lower()
-    if ext == ".xls":
-        sheet = xlrd.open_workbook(file_path).sheet_by_index(0)
-        for i in range(sheet.nrows):
-            yield sheet.row_values(i)
-    elif ext == ".xlsx":
-        sheet = openpyxl.load_workbook(file_path, data_only=True).active
-        for row in sheet.iter_rows(values_only=True):
-            yield list(row)
-    else:
-        raise ValueError("Неподдерживаемый формат файла")
+        return 0.0
 
 
 def detect_operation_type(op: str, income: str, expense: str) -> str:
-    """
-    Определение типа операции по названию и значению.
-    """
+    if not isinstance(op, str):
+        return "other"
     if "Покупка" in op:
         return "buy"
     if "Продажа" in op:
@@ -76,10 +48,11 @@ def detect_operation_type(op: str, income: str, expense: str) -> str:
 
 
 def get_cell(row: List[Any], index: int) -> Any:
-    """
-    Безопасное получение ячейки по индексу.
-    """
-    return row[index] if len(row) > index else None
+    if not isinstance(row, list):
+        return ""
+    if not isinstance(index, int) or index < 0 or index >= len(row):
+        return ""
+    return row[index]
 
 
 def process_operation_row(
@@ -89,13 +62,9 @@ def process_operation_row(
     ticker: str,
     operation_id: str
 ) -> Optional[OperationDTO]:
-    """
-    Обработка строки операции и создание объекта OperationDTO.
-    """
     raw_date = get_cell(row, 1)
     operation = str(get_cell(row, 2)).strip()
 
-    # Пропуск неподходящих операций
     if operation not in VALID_OPERATIONS or operation in SKIP_OPERATIONS:
         return None
 
@@ -106,17 +75,18 @@ def process_operation_row(
     income = str(get_cell(row, 6)).strip()
     expense = str(get_cell(row, 7)).strip()
     payment_sum = income if is_nonzero(income) else expense
+    payment_sum = safe_float(payment_sum)
 
     comment = extract_note(row)
     operation_type = detect_operation_type(operation, income, expense)
-    currency_value = CURRENCY_DICT.get(currency, currency)
+    currency_value = CURRENCY_DICT.get(currency or "", currency or "")
 
     price = safe_float(get_cell(row, 8))
     quantity = safe_float(get_cell(row, 9))
 
-    aci = None
-    if not stock_mode:
-        aci = safe_float(get_cell(row, 6)) or safe_float(get_cell(row, 10))
+    aci = 0.0
+    # if not stock_mode:
+    #     aci = safe_float(get_cell(row, 6)) or safe_float(get_cell(row, 10))
 
     return OperationDTO(
         date=date,
@@ -129,15 +99,11 @@ def process_operation_row(
         quantity=quantity,
         aci=aci,
         comment=comment,
-        operation_id=operation_id
+        operation_id=operation_id,
     )
 
 
-
 def parse_header_data(row_str: str, header_data: Dict[str, Optional[str]]) -> None:
-    """
-    Обновляет словарь header_data на основе строки.
-    """
     if "Генеральное соглашение:" in row_str:
         match = re.search(r"Генеральное соглашение:\s*(\d+)", row_str)
         if match:
@@ -151,14 +117,11 @@ def parse_header_data(row_str: str, header_data: Dict[str, Optional[str]]) -> No
         try:
             header_data["date_start"] = parse_date(parts[parts.index("с") + 1])
             header_data["date_end"] = parse_date(parts[parts.index("по") + 1])
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, TypeError):
             pass
 
 
 def is_table_header(row_str: str) -> bool:
-    """
-    Проверяет, является ли строка заголовком таблицы операций.
-    """
     return all(header in row_str for header in ["Дата", "Операция", "Сумма зачисления"])
 
 
@@ -192,10 +155,7 @@ def parse_financial_operations(
             continue
 
         operation = str(get_cell(row, 2)).strip()
-        if operation in SKIP_OPERATIONS:
-            continue
-
-        if operation not in VALID_OPERATIONS:
+        if operation in SKIP_OPERATIONS or operation not in VALID_OPERATIONS:
             continue
 
         entry = process_operation_row(row, current_currency, stock_mode, ticker, operation_id)
@@ -206,15 +166,20 @@ def parse_financial_operations(
 
 
 def parse_full_statement(file_path: str) -> Dict[str, Any]:
-    rows = list(extract_rows(file_path))
+    try:
+        rows = list(extract_rows(file_path))
+    except Exception as e:
+        raise RuntimeError(f"Ошибка при чтении файла {file_path}: {e}")
+
+    if not rows:
+        raise ValueError(f"Файл {file_path} пуст или не содержит данных.")
+
     header_data, financial_operations = parse_financial_operations(iter(rows))
     trade_operations = parse_trades(file_path)
     operations = financial_operations + trade_operations
 
-    # Сортируем до сериализации
     operations.sort(key=lambda op: (op._sort_key is None, op._sort_key))
 
-    # Превращаем в dict перед отдачей
     operations_dict = [
         {k: v for k, v in op.__dict__.items() if not k.startswith("_")}
         for op in operations
@@ -235,5 +200,5 @@ def default_operation_dto(obj):
     raise TypeError(f"Тип {obj.__class__.__name__} не сериализуем")
 
 
-result = parse_full_statement("pensil.XLSX")
+result = parse_full_statement("1.xls")
 print(json.dumps(result, ensure_ascii=False, indent=2, default=default_operation_dto))
