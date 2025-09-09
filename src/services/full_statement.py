@@ -1,13 +1,10 @@
-from typing import Dict, Any
 from src.parsers.header import parse_header
-from src.utils import logger
+from src.parsers.fin_operations import parse_fin_operations
 
-def parse_full_statement(file_path: str) -> Dict[str, Any]:
-    logger.info("Start parsing %s", file_path)
+def parse_full_statement(file_path: str) -> dict:
     header = parse_header(file_path)
-    result: Dict[str, Any] = {
+    fin_ops = parse_fin_operations(file_path)
+    return {
         **header,
-        "operations": []
+        "operations": [op.to_dict() for op in fin_ops]
     }
-    logger.info("Finished parsing header for %s", file_path)
-    return result
