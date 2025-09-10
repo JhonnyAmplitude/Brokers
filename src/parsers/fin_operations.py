@@ -8,17 +8,21 @@ from src.utils import logger, extract_date
 from src.OperationDTO import OperationDTO
 import src.constants
 
-# Patterns
+# Patterns (raw strings to avoid escape warnings)
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", re.IGNORECASE)
-REG_RE = re.compile(r"\b(?:reg|reg\.|рег\.|рег|регистр\.|регистрац(?:.ию)?)[:\s]*([A-Z0-9\-\/]+)\b", re.IGNORECASE)
-# fallback generic reg number detection (digits with optional dash/slash)
-REG_FALLBACK_RE = re.compile(r"\b[0-9]{2,6}[-/][0-9A-Z]{2,10}\b")
 
-# header keywords mapping (russian-ish)
+REG_LONG_RE = re.compile(r"\b[0-9A-ZА-Я]{1,6}[-/][0-9A-ZА-Я\-\/]{3,}[0-9A-ZА-Я]?\b", re.IGNORECASE)
+REG_SHORT_RE = re.compile(r"\b[КKkК]\d{3,8}\b", re.IGNORECASE)
+
+# more flexible section detection
+SECTION_RE_1 = re.compile(r"финанс\w*\s+операц", re.IGNORECASE)
+SECTION_RE_2 = re.compile(r"операц\w*.*сч(?:ет|ёт)|операции.*сч(?:ет|ёт)|операции\s+по\s+счет", re.IGNORECASE)
+
+# header keywords mapping
 HEADER_KEYWORDS = {
     "date": ["дата", "дата операции"],
     "type": ["операц", "вид операции", "тип операции", "наименование операции"],
-    "sum": ["сумма", "сумма платежа", "сумма / сумма платежа", "платёж", "платеж"],
+    "sum": ["сумма", "сумма платежа", "платёж", "платеж"],
     "currency": ["валюта", "валютa", "вал."],
     "comment": ["коммент", "примечан", "назначение", "информация"],
     "price": ["цена"],
@@ -29,7 +33,8 @@ HEADER_KEYWORDS = {
     "operation_id": ["номер", "id", "ид"],
 }
 
-SECTION_START_MARKERS = ("финансовые операции", "финансовые операции по счету", "финансовые операции по счёту")
+# words that likely mark the end-of-section / totals
+SECTION_END_KEYWORDS = ("итого", "всего", "баланс", "остаток")
 
 
 def to_float(v: Any) -> float:
@@ -51,34 +56,42 @@ def to_int(v: Any) -> int:
 
 
 def find_section_start(df: pd.DataFrame) -> Optional[int]:
-    """Найти индекс строки, где начинается секция 'Финансовые операции'"""
+    """
+    Ищем начало секции с более гибкими эвристиками:
+      - строка содержит 'финанс*' и 'операц*'
+      - или содержит 'операции' и 'счёт/счет/по счет'
+    """
     for idx, row in df.iterrows():
         joined = " ".join([str(c) for c in row if str(c).strip()]).lower()
-        if any(marker in joined for marker in SECTION_START_MARKERS):
-            logger.debug("Found section start at row %s", idx)
+        if not joined:
+            continue
+        if SECTION_RE_1.search(joined) or SECTION_RE_2.search(joined):
+            logger.debug("Found section start at row %s -> %s", idx, joined)
             return idx
     return None
 
 
-def find_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 12) -> Optional[int]:
+def find_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 40) -> Optional[int]:
     """
-    После section start ищем заголовок таблицы — строку, в которой есть ключевые слова (дата, сумма, валюта...)
-    Возвращаем индекс заголовка.
+    После section start ищем строку заголовка таблицы (дата + сумма/валюта/операция).
+    Увеличил lookahead — иногда заголовок идет через несколько строк.
     """
     n = len(df)
     end = min(n, start_idx + lookahead + 1)
     for i in range(start_idx + 1, end):
         row = df.iloc[i]
+        # join lower-case cells
         cells = [str(c).strip().lower() for c in row if str(c).strip()]
         if not cells:
             continue
         joined = " ".join(cells)
-        # простая эвристика: если есть "дата" и "сумма" или "валюта" — это заголовок
+        # If row contains 'дата' and one of ('сумма', 'валюта', 'операц')
         if "дата" in joined and ("сумма" in joined or "валюта" in joined or "операц" in joined):
             logger.debug("Found header row at %s: %s", i, joined)
             return i
-    # fallback: scan further for any row containing 'дата' + one of other keywords
-    for i in range(start_idx + 1, min(n, start_idx + 50)):
+
+    # fallback: scan a bit further for looser matches
+    for i in range(start_idx + 1, min(n, start_idx + 200)):
         row = df.iloc[i]
         joined = " ".join([str(c).strip().lower() for c in row if str(c).strip()])
         if "дата" in joined and ("сумма" in joined or "валюта" in joined):
@@ -88,10 +101,6 @@ def find_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 12) -> Op
 
 
 def map_header_indices(header_row) -> Dict[str, int]:
-    """
-    На основе строки заголовка возвращаем маппинг колонок:
-    { 'date': idx, 'type': idx, 'sum': idx, ... }
-    """
     cols = {}
     for idx, cell in enumerate(header_row):
         if not str(cell).strip():
@@ -99,27 +108,47 @@ def map_header_indices(header_row) -> Dict[str, int]:
         low = str(cell).strip().lower()
         for key, keywords in HEADER_KEYWORDS.items():
             if any(k in low for k in keywords):
-                # prefer first mapping only if not already set
                 if key not in cols:
                     cols[key] = idx
     return cols
 
 
 def extract_isin_and_reg(comment: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Возвращает (isin, reg_number). Ищем ISIN, затем длинный reg, затем короткий (К123456).
+    """
     if not comment:
         return None, None
     c = str(comment)
+
     m_isin = ISIN_RE.search(c)
     isin = m_isin.group(0).upper() if m_isin else None
 
-    # Try explicit reg pattern first
-    m_reg = REG_RE.search(c)
-    reg = m_reg.group(1) if m_reg else None
+    m_reg_long = REG_LONG_RE.search(c)
+    reg = m_reg_long.group(0) if m_reg_long else None
+
     if not reg:
-        m_fallback = REG_FALLBACK_RE.search(c)
-        reg = m_fallback.group(0) if m_fallback else None
+        m_reg_short = REG_SHORT_RE.search(c)
+        reg = m_reg_short.group(0) if m_reg_short else None
+
+    if reg:
+        reg = reg.strip().strip(".,;")
 
     return isin, reg
+
+
+def debug_print_matching_rows(file_path: str, keywords: List[str], max_rows: int = 200):
+    """
+    Утилита: напечатает строки, где встречаются keywords — удобно для отладки.
+    Запускать вручную при необходимости.
+    """
+    df = pd.read_excel(file_path, header=None, dtype=object).fillna("")
+    for idx, row in df.iterrows():
+        joined = " ".join([str(c).strip().lower() for c in row if str(c).strip()])
+        if any(k in joined for k in keywords):
+            logger.info("Row %s: %s", idx, joined)
+        if idx >= max_rows:
+            break
 
 
 def parse_fin_operations(file_path: str) -> List[OperationDTO]:
@@ -129,7 +158,10 @@ def parse_fin_operations(file_path: str) -> List[OperationDTO]:
 
     start_idx = find_section_start(df)
     if start_idx is None:
-        logger.info("Section 'Финансовые операции' not found")
+        logger.info("Section 'Финансовые операции' not found (tried flexible heuristics).")
+        # For debugging: print lines that look similar to 'финансов'/'операц'
+        logger.debug("Dumping rows that contain 'финанс' or 'операц' for inspection...")
+        debug_print_matching_rows(file_path, ["финанс", "операц", "операции", "субсчет", "субсчета"], max_rows=200)
         return []
 
     header_idx = find_header_row(df, start_idx)
@@ -142,42 +174,36 @@ def parse_fin_operations(file_path: str) -> List[OperationDTO]:
     logger.debug("Detected columns: %s", cols)
 
     ops: List[OperationDTO] = []
-    # rows after header
     for i in range(header_idx + 1, len(df)):
         row = df.iloc[i]
         cells = [str(c).strip() for c in row if str(c).strip()]
-        if (not cells) or any(k in " ".join(cells).lower() for k in ("итого", "всего", "баланс", "остаток")):
-            # treat as end of section
+        if (not cells) or any(k in " ".join(cells).lower() for k in SECTION_END_KEYWORDS):
             break
 
-        # If there is a row that looks like a new section title, stop
         joined_low = " ".join(cells).lower()
-        if any(marker in joined_low for marker in SECTION_START_MARKERS):
+
+        if "внебиржев" in joined_low or "внебиржевой рынок" in joined_low:
+            logger.info("Encountered 'Внебиржевой рынок' at row %s — stopping financial operations parsing.", i)
             break
 
-        # extract fields using cols mapping with safe fallback
         def g(col_key: str) -> Any:
             idx = cols.get(col_key)
             return row[idx] if idx is not None else None
 
-        # date
         date_val = extract_date(g("date"))
-        # operation type raw
         op_raw = g("type")
         op_raw_s = str(op_raw).strip() if op_raw is not None else ""
 
-        # payment sum and currency
         payment_raw = g("sum") or g("payment") or None
         payment_sum = to_float(payment_raw)
 
         currency_raw = g("currency")
         currency = str(currency_raw).strip() if currency_raw is not None else ""
-        currency_normalized = constants.CURRENCY_DICT.get(currency.upper(), currency.upper() if currency else "")
+        currency_normalized = src.constants.CURRENCY_DICT.get(currency.upper(), currency.upper() if currency else "")
 
         comment_raw = g("comment")
         comment = str(comment_raw).strip() if comment_raw is not None else ""
 
-        # try to extract ticker/isin/reg from specific columns or comment
         ticker = ""
         if "ticker" in cols:
             ticker = str(g("ticker") or "").strip()
@@ -186,68 +212,60 @@ def parse_fin_operations(file_path: str) -> List[OperationDTO]:
         isin = isin_col or None
         reg_number = ""
 
-        if not isin or isin == "":
+        if not isin:
             isin_c, reg_c = extract_isin_and_reg(comment)
             if isin_c:
                 isin = isin_c
             if reg_c:
                 reg_number = reg_c
 
-        # If reg column exists explicitly
         if "reg_number" in cols:
             reg_number = str(g("reg_number") or reg_number or "").strip()
 
-        # price and quantity and aci
         price = to_float(g("price"))
         quantity = to_int(g("quantity"))
         aci = to_float(g("aci"))
 
-        # Operation filtering / mapping
-        # Normalize operation name for matching
         op_norm = op_raw_s.strip()
-        # Try to find first matching valid operation name in constants.VALID_OPERATIONS or SKIP_OPERATIONS
-        # Many operation names can be long; we'll try direct match or substring match
         op_type = None
         if op_norm:
-            # exact match
-            if op_norm in constants.SKIP_OPERATIONS:
+            if op_norm in src.constants.SKIP_OPERATIONS:
                 logger.debug("Skipping operation (skip list): %s (row %s)", op_norm, i)
                 continue
-            if op_norm in constants.VALID_OPERATIONS:
-                op_type = constants.OPERATION_TYPE_MAP.get(op_norm) or op_norm.lower().replace(" ", "_")
+            if op_norm in src.constants.VALID_OPERATIONS:
+                op_type = src.constants.OPERATION_TYPE_MAP.get(op_norm) or op_norm.lower().replace(" ", "_")
             else:
-                # substring match
                 found = None
-                for valid in constants.VALID_OPERATIONS:
+                for valid in src.constants.VALID_OPERATIONS:
                     if valid.lower() in op_norm.lower():
                         found = valid
                         break
                 if found:
-                    op_type = constants.OPERATION_TYPE_MAP.get(found) or found.lower().replace(" ", "_")
+                    op_type = src.constants.OPERATION_TYPE_MAP.get(found) or found.lower().replace(" ", "_")
 
-        # special handlers
-        if not op_type and op_norm in constants.SPECIAL_OPERATION_HANDLERS:
+        if not op_type and op_norm in src.constants.SPECIAL_OPERATION_HANDLERS:
             try:
-                handler = constants.SPECIAL_OPERATION_HANDLERS[op_norm]
-                op_type = handler(payment_sum, None)  # second arg placeholder (could be entire row)
+                handler = src.constants.SPECIAL_OPERATION_HANDLERS[op_norm]
+                op_type = handler(payment_sum, None)
             except Exception:
                 op_type = None
 
-        # If still not resolved, try map by substring keys
         if not op_type:
-            for k, v in constants.OPERATION_TYPE_MAP.items():
+            for k, v in src.constants.OPERATION_TYPE_MAP.items():
                 if k.lower() in op_norm.lower():
                     op_type = v
                     break
 
-        # If operation name empty, skip
         if not op_type:
-            # If operation name absent but payment nonzero, still keep as 'other'
-            if constants.is_nonzero(payment_sum):
+            if src.constants.get_sign(payment_sum):
                 op_type = "other"
             else:
                 logger.debug("Skipping empty/irrelevant operation at row %s: %s", i, op_norm)
                 continue
+
+        if op_type == "coupon" and (payment_sum is None or float(payment_sum) <= 0.0):
+            continue
+
 
         dto = OperationDTO(
             date=date_val,
