@@ -19,10 +19,17 @@ def main():
     with out_path.open("w", encoding="utf-8") as f:
         json.dump(out, f, ensure_ascii=False, indent=2)
 
-    # короткий вывод в консоль
-    ops_count = len(out.get("operations", []))
+    # достаём мета-данные
+    meta = out.get("meta", {})
+    fin_count = meta.get("fin_ops_raw_count", 0)
+    trade_count = meta.get("trade_ops_raw_count", 0)
+    total_ops = meta.get("total_ops_count", len(out.get("operations", [])))
+    acct_id = out.get("account_id") or out.get("account") or out.get("client_id", "N/A")
+
+    # лог и печать в консоль
     logger.info(f"Результат сохранён в {out_path.resolve()}")
-    print(f"Аккаунт: {out.get('account_id')}, операций: {ops_count}")
+    print(f"Аккаунт: {acct_id}, операций: {total_ops}")
+    print(f"  финансовых операций: {fin_count}, операции с ценными бумагами: {trade_count}")
 
 
 if __name__ == "__main__":

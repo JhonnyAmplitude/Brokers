@@ -1,3 +1,4 @@
+# src/parsers/fin_operations.py
 from __future__ import annotations
 import re
 from typing import List, Optional, Dict, Any, Tuple
@@ -159,7 +160,7 @@ def parse_fin_operations(file_path: str) -> List[OperationDTO]:
     start_idx = find_section_start(df)
     if start_idx is None:
         logger.info("Section 'Финансовые операции' not found (tried flexible heuristics).")
-        # For debugging: print lines that look similar to 'финансов'/'операц'
+        # For debugging: print lines that look similar to 'финанс'/'операц'
         logger.debug("Dumping rows that contain 'финанс' or 'операц' for inspection...")
         debug_print_matching_rows(file_path, ["финанс", "операц", "операции", "субсчет", "субсчета"], max_rows=200)
         return []
@@ -226,46 +227,67 @@ def parse_fin_operations(file_path: str) -> List[OperationDTO]:
         quantity = to_int(g("quantity"))
         aci = to_float(g("aci"))
 
-        op_norm = op_raw_s.strip()
-        op_type = None
-        if op_norm:
-            if op_norm in src.constants.SKIP_OPERATIONS:
-                logger.debug("Skipping operation (skip list): %s (row %s)", op_norm, i)
-                continue
-            if op_norm in src.constants.VALID_OPERATIONS:
-                op_type = src.constants.OPERATION_TYPE_MAP.get(op_norm) or op_norm.lower().replace(" ", "_")
-            else:
-                found = None
-                for valid in src.constants.VALID_OPERATIONS:
-                    if valid.lower() in op_norm.lower():
-                        found = valid
-                        break
-                if found:
-                    op_type = src.constants.OPERATION_TYPE_MAP.get(found) or found.lower().replace(" ", "_")
+        # ------------------ improved op_type logic using src.constants ------------------
+        op_norm_raw = src.constants.norm_str(op_raw)  # normalized operation raw text
+        op_low = op_norm_raw  # already lowercased by norm_str
 
-        if not op_type and op_norm in src.constants.SPECIAL_OPERATION_HANDLERS:
-            try:
-                handler = src.constants.SPECIAL_OPERATION_HANDLERS[op_norm]
-                op_type = handler(payment_sum, None)
-            except Exception:
-                op_type = None
+        # Build small entry dict for handlers if they need extra fields
+        entry = {
+            "date": date_val,
+            "raw_type": op_raw_s,
+            "sum": payment_sum,
+            "currency": currency_normalized,
+            "comment": comment,
+            "ticker": ticker,
+            "isin": isin or "",
+            "reg_number": reg_number or "",
+        }
 
+        # 1) skip explicit skip list (substring match against normalized skip keys)
+        if op_low and any(skip_key in op_low for skip_key in src.constants.NORMALIZED_SKIP_OPERATIONS):
+            logger.debug("Skipping operation (skip list substring): %s (row %s)", op_raw_s, i)
+            continue
+
+        # 1.5) Try special operation handlers first
+        op_type: Optional[str] = src.constants.resolve_special_operation(op_raw, payment_sum, entry)
+
+        # 2) direct mapping if operation known exactly (normalized comparison)
+        if not op_type and op_low and op_low in src.constants.NORMALIZED_VALID_OPERATIONS:
+            # OPERATION_TYPE_MAP keys are normalized in constants
+            op_type = src.constants.OPERATION_TYPE_MAP.get(op_low, op_low.replace(" ", "_"))
+
+        # 3) try substring matches against OPERATION_TYPE_MAP keys
         if not op_type:
             for k, v in src.constants.OPERATION_TYPE_MAP.items():
-                if k.lower() in op_norm.lower():
+                # keys in OPERATION_TYPE_MAP are normalized strings
+                if k in op_low:
                     op_type = v
                     break
 
+        # 4) final fallback: decide by sign (get_sign returns -1/0/+1)
         if not op_type:
-            if src.constants.get_sign(payment_sum):
-                op_type = "other"
+            sign = src.constants.get_sign(payment_sum)
+            if sign < 0:
+                op_type = "withdrawal"
+            elif sign > 0:
+                op_type = "deposit"
             else:
-                logger.debug("Skipping empty/irrelevant operation at row %s: %s", i, op_norm)
+                logger.debug("Skipping unknown operation with zero/unknown sum at row %s: %s", i, op_raw_s)
                 continue
 
-        if op_type == "coupon" and (payment_sum is None or float(payment_sum) <= 0.0):
-            continue
+        # 5) if transfer — choose direction by sign
+        if op_type == "transfer":
+            sign = src.constants.get_sign(payment_sum)
+            if sign < 0:
+                op_type = "withdrawal"
+            elif sign > 0:
+                op_type = "deposit"
 
+        # 6) coupons: keep only positive receipts
+        if op_type == "coupon" and (payment_sum is None or float(payment_sum) <= 0.0):
+            logger.debug("Skipping coupon with non-positive sum: %s (row %s)", payment_sum, i)
+            continue
+        # ------------------------------------------------------------------------------------
 
         dto = OperationDTO(
             date=date_val,
