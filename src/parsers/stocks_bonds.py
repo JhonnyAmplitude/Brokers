@@ -7,7 +7,7 @@ from datetime import datetime as _dt
 from datetime import datetime
 
 from src.OperationDTO import OperationDTO
-from src.utils import logger
+from src.utils import logger, to_num_safe, to_int_safe
 import src.constants
 
 # Patterns
@@ -60,10 +60,44 @@ def find_trades_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 8)
     return None
 
 
-def map_trades_header_indices(header_row) -> Dict[str, int]:
+def _build_combined_header(df: pd.DataFrame, header_idx: int, max_rows: int = 3) -> List[str]:
+    """
+    Собирает комбинированные заголовки по колонкам, объединяя up to max_rows строк,
+    начиная с header_idx. Возвращает список строк длиной = число колонок.
+    Это делает парсинг устойчивым к многострочным заголовкам.
+    """
+    ncols = df.shape[1]
+    rows = []
+    end = min(len(df), header_idx + max_rows)
+    for r in range(header_idx, end):
+        rows.append(df.iloc[r].astype(str).fillna("").tolist())
+
+    combined = []
+    for c in range(ncols):
+        parts = []
+        for r in range(len(rows)):
+            cell = rows[r][c] if c < len(rows[r]) else ""
+            cell = str(cell).strip()
+            if cell:
+                parts.append(cell)
+        combined.append(" ".join(parts).strip().lower())
+    return combined
+
+
+def map_trades_header_indices(header_row: Union[pd.Series, List[str]]) -> Dict[str, int]:
+    """
+    Универсальная версия: header_row может быть Series (одна строка) или List[str]
+    (combination of multiple header lines per column). Возвращает маппинг ключ->index.
+    """
     cols: Dict[str, int] = {}
-    for idx, cell in enumerate(header_row):
-        if not str(cell).strip():
+    # если передана серия — превратим в list
+    if isinstance(header_row, pd.Series):
+        headers = [str(c).strip() for c in header_row.tolist()]
+    else:
+        headers = [str(h).strip() for h in header_row]
+
+    for idx, cell in enumerate(headers):
+        if not cell:
             continue
         low = src.constants.norm_str(cell)
         for key, keywords in HEADER_KEYWORDS_TRADES.items():
@@ -129,17 +163,41 @@ def parse_instrument_cell(cell: Any) -> Tuple[str, str, str]:
     return ticker, isin, reg_number
 
 
-def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) -> List[OperationDTO]:
+def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) -> tuple[List[OperationDTO], dict]:
     results: List[OperationDTO] = []
     curr_ticker, curr_isin, curr_reg = "", "", ""
-    for row in df.iloc[header_idx + 1 :].itertuples(index=False):
+
+    total_rows = 0
+    parsed_rows = 0
+    skipped_empty = 0
+    skipped_no_date = 0
+    skipped_no_qty = 0
+    skipped_no_type = 0
+    skipped_itogo = 0
+
+    # iterate rows after header
+    for r_idx in range(header_idx + 1, len(df)):
+        total_rows += 1
+        row = df.iloc[r_idx]
         cells = list(row)
-        if all((c is None or (isinstance(c, str) and not c.strip())) for c in cells):
+        text_row = " ".join(str(c).strip() for c in cells if str(c).strip()).lower()
+
+        # --- стоп на новом блоке ---
+        if "завершенные" in text_row and "сделки с ценными бумагами" in text_row:
+            logger.debug("Reached closing trades block at row %s: %s", r_idx, text_row)
             break
-        if any(isinstance(c, str) and src.constants.norm_str(c).startswith("итого") for c in cells):
+
+        # --- пропускаем пустые строки ---
+        if all((c is None or (isinstance(c, str) and not c.strip())) for c in cells):
+            skipped_empty += 1
             continue
 
-        # instrument: if present — parse and update current; if absent/empty — reuse last
+        # --- игнорируем строки 'Итого' ---
+        if any(isinstance(c, str) and src.constants.norm_str(c).startswith("итого") for c in cells):
+            skipped_itogo += 1
+            continue
+
+        # instrument: если есть — обновляем, если пусто — используем прошлое
         inst_idx = cols.get("instrument")
         if inst_idx is not None and inst_idx < len(cells):
             inst_cell = cells[inst_idx]
@@ -151,36 +209,29 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
                     curr_isin = isin
                 if regno:
                     curr_reg = regno
-            # else: empty cell -> keep curr_*
-        # else: no instrument column mapped -> keep empty currs
 
         # datetime
         date_val = None
         dt_idx = cols.get("datetime")
         if dt_idx is not None and dt_idx < len(cells):
             raw_dt = cells[dt_idx]
-            if raw_dt is None or (isinstance(raw_dt, str) and not str(raw_dt).strip()):
-                date_val = None
-            else:
+            if raw_dt and str(raw_dt).strip():
                 s = str(raw_dt).strip()
                 s_fixed = s.replace(",", ".").replace("\u00A0", " ")
-                date_val = None
-
-                _try_formats = ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M:%S")
+                _try_formats = ("%d.%m.%Y %H:%M:%S", "%d.%m.%Y %H:%M", "%Y-%m-%d %H:%M:%S", "%d.%m.%Y")
                 for _fmt in _try_formats:
                     try:
                         date_val = _dt.strptime(s_fixed, _fmt)
                         break
                     except Exception:
                         continue
-
                 if date_val is None:
-                    try:
-                        pd_dt = pd.to_datetime(s_fixed, dayfirst=True, errors="coerce")
-                        if pd_dt is not None and not pd.isna(pd_dt):
-                            date_val = pd_dt.to_pydatetime()
-                    except Exception:
-                        date_val = None
+                    pd_dt = pd.to_datetime(s_fixed, dayfirst=True, errors="coerce")
+                    if pd_dt is not None and not pd.isna(pd_dt):
+                        date_val = pd_dt.to_pydatetime()
+        if date_val is None:
+            skipped_no_date += 1
+            continue
 
         # type
         op_type_raw = ""
@@ -189,24 +240,21 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
             op_type_raw = str(cells[t_idx]).strip().lower()
         if "покуп" in op_type_raw:
             op = "buy"
-        elif "продаж" in op_type_raw or "продажa" in op_type_raw or "продажа" in op_type_raw or "продать" in op_type_raw:
+        elif "продаж" in op_type_raw or "продажа" in op_type_raw or "продать" in op_type_raw:
             op = "sale"
         else:
             op = "buy" if "куп" in op_type_raw else "sale" if "прод" in op_type_raw else None
         if op is None:
+            skipped_no_type += 1
             continue
 
-        # quantity
+        # quantity — используем to_int_safe
         qty = 0
         q_idx = cols.get("quantity")
         if q_idx is not None and q_idx < len(cells):
-            try:
-                qty = int(round(abs(float(str(cells[q_idx]).replace("\u00A0", "").replace(" ", "").replace(",", ".") or 0.0))))
-            except Exception:
-                qty = 0
-
+            qty = to_int_safe(cells[q_idx])
         if qty == 0:
-            # if no quantity — skip (likely not a trade row)
+            skipped_no_qty += 1
             continue
 
         # price
@@ -220,7 +268,8 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
         cur_idx = cols.get("currency_calc")
         if cur_idx is not None and cur_idx < len(cells):
             currency_raw = str(cells[cur_idx]).strip()
-            currency = src.constants.CURRENCY_DICT.get(currency_raw.upper(), currency_raw.upper() if currency_raw else "")
+            currency = src.constants.CURRENCY_DICT.get(currency_raw.upper(),
+                                                       currency_raw.upper() if currency_raw else "")
 
         # sum
         total = 0.0
@@ -261,42 +310,50 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
             operation_id=op_id,
         )
         results.append(dto)
+        parsed_rows += 1
 
-    return results
+    stats = {
+        "total_rows": total_rows,
+        "parsed": parsed_rows,
+        "skipped_empty": skipped_empty,
+        "skipped_no_date": skipped_no_date,
+        "skipped_no_qty": skipped_no_qty,
+        "skipped_no_type": skipped_no_type,
+        "skipped_itogo": skipped_itogo,
+    }
+
+    logger.info(
+        "Trades parsing stats: total_rows=%s parsed=%s skipped_empty=%s skipped_no_date=%s skipped_no_qty=%s skipped_no_type=%s skipped_itogo=%s",
+        total_rows, parsed_rows, skipped_empty, skipped_no_date, skipped_no_qty, skipped_no_type, skipped_itogo
+    )
+
+    return results, stats
 
 
-def to_num_safe(v: Any) -> float:
-    if v is None:
-        return 0.0
-    try:
-        s = str(v).replace("\u00A0", " ").replace(" ", "").replace(",", ".")
-        return float(s) if s not in ("", "-", "--") else 0.0
-    except Exception:
-        try:
-            return float(str(v).replace(",", "."))
-        except Exception:
-            return 0.0
-
-
-def parse_stock_bond_trades(file_path: Union[str, Any]) -> List[OperationDTO]:
+def parse_stock_bond_trades(file_path: Union[str, Any]) -> tuple[List[OperationDTO], dict]:
     df = pd.read_excel(file_path, header=None, dtype=object).fillna("")
     start_idx = find_trades_block_start(df)
     if start_idx is None:
         logger.info("Trades block 'Заключенные в отчетном периоде сделки с ценными бумагами' not found")
-        return []
+        return [], {}
 
     header_idx = find_trades_header_row(df, start_idx)
     if header_idx is None:
         logger.warning("Trades header row not found after block start; attempting to use start_idx as header")
         header_idx = start_idx
 
-    header_row = df.iloc[header_idx]
-    cols = map_trades_header_indices(header_row)
+    # build combined header to support multi-line headers
+    combined_header = _build_combined_header(df, header_idx, max_rows=3)
+    cols = map_trades_header_indices(combined_header)
     if not cols:
-        logger.warning("Could not map any trade columns from header row: %s", list(header_row))
-        return []
+        # fallback: try single header row
+        header_row = df.iloc[header_idx]
+        cols = map_trades_header_indices(header_row)
+    if not cols:
+        logger.warning("Could not map any trade columns from header row(s): %s", combined_header[:10])
+        return [], {}
 
-    results = parse_trades_table(df.iloc[header_idx + 0:], header_idx, cols)
+    results, stats = parse_trades_table(df, header_idx, cols)
 
     # sort by date
     def key_fn(o: OperationDTO):
@@ -308,4 +365,5 @@ def parse_stock_bond_trades(file_path: Union[str, Any]) -> List[OperationDTO]:
         except Exception:
             return pd.NaT
 
-    return sorted(results, key=key_fn)
+    results_sorted = sorted(results, key=key_fn)
+    return results_sorted, stats

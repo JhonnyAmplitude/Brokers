@@ -37,7 +37,6 @@ def to_float_safe(v: Any) -> Optional[float]:
         return None
 
 
-# ---- Sign helper ----
 def get_sign(value: Any) -> int:
     """
     Возвращает:
@@ -56,7 +55,6 @@ def get_sign(value: Any) -> int:
     return 0
 
 
-# ---- Оригинальные множества / словари (читаемые человеком) ----
 VALID_OPERATIONS = {
     "Вознаграждение компании",
     "Вознаграждение Брокера",
@@ -76,25 +74,24 @@ VALID_OPERATIONS = {
 }
 
 SKIP_OPERATIONS = {
+    "Перераспределение дохода между субсчетами / торговыми площадками",
+    "Перераспределение дохода",
+    "Сальдо расчётов по сделкам с ценными бумагами",
+    "Сальдо расчетов по сделкам",
     "Внебиржевая сделка FX (22*)",
     "Займы \"овернайт\"",
     "НКД от операций",
     "Покупка/Продажа",
     "Покупка/Продажа (репо)",
     "Переводы между площадками",
-    "Перераспределение дохода между субсчетами / торговыми площадками",
-    "Сальдо расчётов по сделкам с ценными бумагами",
     "Иные неторговые операции",
 }
 
 
-# ---- Нормализованные наборы (для быстрого сравнения в парсере) ----
 NORMALIZED_VALID_OPERATIONS = {norm_str(x) for x in VALID_OPERATIONS}
 NORMALIZED_SKIP_OPERATIONS = {norm_str(x) for x in SKIP_OPERATIONS}
 
 
-# ---- Маппинг строковых названий операций -> canonical type
-# Ключи — НИЖНИЙ РЕГИСТР и нормализованные; так удобнее сравнивать через "in" / equals
 OPERATION_TYPE_MAP: Dict[str, str] = {
     _norm_key("Дивиденды"): "dividend",
     _norm_key("Купонный доход"): "coupon",
@@ -107,19 +104,13 @@ OPERATION_TYPE_MAP: Dict[str, str] = {
     _norm_key("Списание денежных средств"): "withdrawal",
     _norm_key("Вознаграждение Брокера"): "commission",
     _norm_key("Вознаграждение сторонних организаций"): "commission",
-    # можно дополнять ключи-синонимы, например:
     _norm_key("приход дс"): "deposit",
     _norm_key("вывод дс"): "withdrawal",
 }
 
-
-# ---- SPECIAL handlers: операции, где значение зависит от знака/контекста ----
-# Ключи — нормализованные; значения — callables (amount, entry) -> canonical_type
-# Примечание: handler получает сумму (raw или float) и словарь/entry строки (если нужно)
 SPECIAL_OPERATION_HANDLERS: Dict[str, Callable[[Any, dict], str]] = {
     _norm_key("Вознаграждение компании"): lambda amount, entry: "commission_refund" if get_sign(amount) > 0 else "commission",
     _norm_key("НДФЛ"): lambda amount, entry: "refund" if get_sign(amount) > 0 else "withholding",
-    # пример (раскомментируйте, если хотите обрабатывать переводы через хендлер):
     # _norm_key("Перевод денежных средств"): lambda amount, entry: "deposit" if get_sign(amount) > 0 else "withdrawal",
 }
 
@@ -134,17 +125,14 @@ def resolve_special_operation(op_raw: Any, amount: Any, entry: Optional[dict] = 
         return None
     op_norm = norm_str(op_raw)
     for key, handler in SPECIAL_OPERATION_HANDLERS.items():
-        # используем substring match — это надёжнее для вариативных формулировок
         if key in op_norm:
             try:
                 return handler(amount, entry or {})
             except Exception:
-                # не кидаем ошибку тут — пусть парсер логирует исключение при необходимости
                 return None
     return None
 
 
-# ---- Валюты ----
 CURRENCY_DICT = {
     "AED": "AED", "AMD": "AMD", "BYN": "BYN", "CHF": "CHF", "CNY": "CNY",
     "EUR": "EUR", "GBP": "GBP", "HKD": "HKD", "JPY": "JPY", "KGS": "KGS",
