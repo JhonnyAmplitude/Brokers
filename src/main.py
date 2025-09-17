@@ -1,53 +1,63 @@
-import sys
-import json
+# src/main.py
+import tempfile
 from pathlib import Path
+
+from fastapi import FastAPI, UploadFile, File, HTTPException, status
+from fastapi.responses import JSONResponse
+from fastapi.encoders import jsonable_encoder
 
 from src.services.full_statement import parse_full_statement
 from src.utils import logger
 
 
-def main():
-    if len(sys.argv) < 2:
-        logger.error("Usage: python -m src.main <path_to_excel>")
-        sys.exit(1)
-
-    path = sys.argv[1]
-    out = parse_full_statement(path)
-
-    # сохраняем результат
-    out_path = Path("result.json")
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(out, f, ensure_ascii=False, indent=2, default=str)
-
-    # извлекаем нужные метрики
-    meta = out.get("meta", {})
-    fin_stats = meta.get("fin_ops_stats", {})
-    trade_stats = meta.get("trade_ops_stats", {})
-
-    fin_parsed = fin_stats.get("parsed", 0)
-    trade_parsed = trade_stats.get("parsed", 0)
-    total_ops = meta.get("total_ops_count", len(out.get("operations", [])))
-    acct_id = out.get("account_id") or out.get("account") or out.get("client_id", "N/A")
-
-    # нераспознанные названия (уже уникализированные в парсере)
-    unrec_names = fin_stats.get("unrecognized_names", []) or []
-    unrec_count = len(unrec_names)
-
-    # печать в компактном виде (лимит имён до 50, чтобы не раздувать строку)
-    names_part = ""
-    if unrec_names:
-        display = unrec_names[:50]
-        names_part = ": " + "; ".join(display)
-        if unrec_count > len(display):
-            names_part += f"; ...(+{unrec_count - len(display)} more)"
-
-    # сохранённый лог
-    logger.info("Результат сохранён в %s", out_path.resolve())
-
-    # требуемый компактный вывод
-    print(f"Аккаунт: {acct_id}, операций: {total_ops}")
-    print(f"  финансовых операций: {fin_parsed}, операции с ценными бумагами: {trade_parsed}, не распознанные финансовые операции: {unrec_count}{names_part}")
+app = FastAPI(title="VTB Statement Parser API", version="1.0")
 
 
-if __name__ == "__main__":
-    main()
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.post("/parse-report", response_class=JSONResponse)
+async def parse_report(file: UploadFile = File(...)):
+    filename = Path(file.filename).name if file.filename else "uploaded.xlsx"
+    logger.info("Получен файл: %s (content_type=%s)", filename, file.content_type)
+
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=Path(filename).suffix) as tmp:
+            tmp_path = Path(tmp.name)
+            content = await file.read()
+            tmp.write(content)
+            tmp.flush()
+    except Exception as e:
+        logger.exception("Ошибка сохранения загруженного файла: %s", e)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Не удалось сохранить файл")
+
+    try:
+        result = parse_full_statement(str(tmp_path))
+    except Exception as e:
+        logger.exception("Ошибка парсинга: %s", e)
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ошибка парсинга: {e}")
+
+    tmp_path.unlink(missing_ok=True)
+
+    ops_count = len(result.get("operations", []))
+    fin_ops = result.get("meta", {}).get("fin_ops_raw_count", 0)
+    trade_ops = result.get("meta", {}).get("trade_ops_raw_count", 0)
+    unknown_fin_ops = result.get("meta", {}).get("unknown_fin_ops", [])
+
+    logger.info(
+        "%s Аккаунт: %s, операций: %s финансовых операций: %s, операции с ценными бумагами: %s, "
+        "не распознанные финансовые операции: %s%s",
+        filename,
+        result.get("account_id"),
+        ops_count,
+        fin_ops,
+        trade_ops,
+        len(unknown_fin_ops),
+        (": " + ", ".join(unknown_fin_ops) if unknown_fin_ops else ""),
+    )
+
+    return JSONResponse(content=jsonable_encoder(result))
+

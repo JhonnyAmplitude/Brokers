@@ -7,7 +7,7 @@ from typing import Any, Optional
 
 
 def get_logger(name: str = "parser_vtb") -> logging.Logger:
-    level_name = os.getenv("PARSER_LOGLEVEL", "INFO").upper()
+    level_name = os.getenv("PARSER_LOGLEVEL", "DEBUG").upper()
     level = getattr(logging, level_name, logging.INFO)
     logger = logging.getLogger(name)
     if not logger.handlers:
