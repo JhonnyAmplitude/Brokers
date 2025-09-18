@@ -54,9 +54,7 @@ SECTION_END_KEYWORDS = ("итого", "всего", "баланс", "остат�
 
 
 def debug_print_matching_rows(file_path: str, keywords: List[str], max_rows: int = 200):
-    """
-    Утилита: напечатает строки, где встречаются keywords — удобно для отладки.
-    """
+    """Для отладки: печатает строки, где встречаются keywords."""
     try:
         df = pd.read_excel(file_path, header=None, dtype=object).fillna("")
     except Exception:
@@ -70,25 +68,19 @@ def debug_print_matching_rows(file_path: str, keywords: List[str], max_rows: int
 
 
 def find_section_start(df: pd.DataFrame) -> Optional[int]:
-    """
-    Ищем начало секции 'Финансовые операции' с гибкими эвристиками.
-    Возвращаем индекс строки, где начинается секция (строка с заголовком),
-    или None если не найдено.
-    """
+    """Ищем начало секции 'Финансовые операции' или 'Операции по счёту'."""
     for idx, row in df.iterrows():
         joined = " ".join([str(c) for c in row if str(c).strip()]).lower()
         if not joined:
             continue
         if SECTION_RE_1.search(joined) or SECTION_RE_2.search(joined):
-            logger.debug("Найдена строка начала секции финансовых операций: %s -> %s", idx, joined)
+            logger.debug("Найдена строка начала секции фин. операций: %s -> %s", idx, joined)
             return idx
     return None
 
 
 def find_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 40) -> Optional[int]:
-    """
-    После section start ищем строку заголовка таблицы (дата + сумма/валюта/операция).
-    """
+    """После section start ищем строку заголовка таблицы."""
     n = len(df)
     end = min(n, start_idx + lookahead + 1)
     for i in range(start_idx + 1, end):
@@ -98,14 +90,7 @@ def find_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 40) -> Op
             continue
         joined = " ".join(cells)
         if "дата" in joined and ("сумма" in joined or "валюта" in joined or "операц" in joined):
-            logger.debug("Найдена строка заголовка финансовой таблицы: %s: %s", i, joined)
-            return i
-
-    for i in range(start_idx + 1, min(n, start_idx + 200)):
-        row = df.iloc[i]
-        joined = " ".join([str(c).strip().lower() for c in row if str(c).strip()])
-        if "дата" in joined and ("сумма" in joined or "валюта" in joined):
-            logger.debug("Найдена строка заголовка финансовой таблицы (fallback) в строке %s: %s", i, joined)
+            logger.debug("Найдена строка заголовка фин. таблицы: %s: %s", i, joined)
             return i
     return None
 
@@ -124,9 +109,7 @@ def map_header_indices(header_row) -> Dict[str, int]:
 
 
 def extract_isin_and_reg(comment: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Возвращает (isin, reg_number). Ищем ISIN, затем длинный reg, затем короткий (К123456).
-    """
+    """Возвращает (isin, reg_number), если найдены в комментарии."""
     if not comment:
         return None, None
     c = str(comment)
@@ -135,22 +118,19 @@ def extract_isin_and_reg(comment: str) -> Tuple[Optional[str], Optional[str]]:
     isin = m_isin.group(0).upper() if m_isin else None
 
     REG_LONG_RE = re.compile(r"\b[0-9A-ZА-Я]{1,6}[-/][0-9A-ZА-Я\-\/]{3,}[0-9A-ZА-Я]?\b", re.IGNORECASE)
-    REG_SHORT_RE = re.compile(r"\b[КKkК]\d{3,8}\b", re.IGNORECASE)
+    REG_SHORT_RE = re.compile(r"\b[КK]\d{3,8}\b", re.IGNORECASE)
 
     m_reg_long = REG_LONG_RE.search(c)
     reg = m_reg_long.group(0) if m_reg_long else None
-
     if not reg:
         m_reg_short = REG_SHORT_RE.search(c)
         reg = m_reg_short.group(0) if m_reg_short else None
-
     if reg:
         reg = reg.strip().strip(".,;")
-
     return isin, reg
 
 
-# ----------------- основной парсер финансовых операций -----------------
+# ----------------- основной парсер -----------------
 def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
     logger.info("Парсим финансовые операции из %s", file_path)
     try:
@@ -172,25 +152,23 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         "unrecognized_names": [],
     }
 
-    # normalized helper & maps
+    # helpers
     _norm = getattr(src.constants, "norm_str", lambda x: str(x).strip().lower() if x else "")
     normalized_skip = { _norm(x) for x in getattr(src.constants, "SKIP_OPERATIONS", set()) }
     normalized_valid = { _norm(x) for x in getattr(src.constants, "VALID_OPERATIONS", set()) }
     normalized_op_map = { _norm(k): v for k, v in getattr(src.constants, "OPERATION_TYPE_MAP", {}).items() }
-    op_map_keys = list(normalized_op_map.keys())
     special_handlers = getattr(src.constants, "SPECIAL_OPERATION_HANDLERS", {})
     normalized_special_map = { _norm(k): k for k in special_handlers.keys() }
 
     start_idx = find_section_start(df)
     if start_idx is None:
-        logger.info("Секция 'Финансовые операции' не найдена (использовались гибкие эвристики).")
-        debug_print_matching_rows(file_path, ["финанс", "операц", "операции", "субсчет", "субсчета"], max_rows=200)
+        logger.info("Секция финансовых операций не найдена.")
         stats["skipped_section_not_found"] = 1
         return [], stats
 
     header_idx = find_header_row(df, start_idx)
     if header_idx is None:
-        logger.warning("Строка заголовка для финансовых операций не найдена, прерываем парсинг")
+        logger.warning("Строка заголовка не найдена")
         stats["skipped_header_not_found"] = 1
         return [], stats
 
@@ -203,13 +181,9 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         stats["total_rows"] += 1
         row = df.iloc[i]
         cells = [str(c).strip() for c in row if str(c).strip()]
-        if (not cells) or any(k in " ".join(cells).lower() for k in SECTION_END_KEYWORDS):
-            break
-
         joined_low = " ".join(cells).lower()
 
-        if "внебиржев" in joined_low or "внебиржевой рынок" in joined_low:
-            logger.info("Наткнулись на 'Внебиржевой рынок' в строке %s — прекращаем парсинг финансовых операций.", i)
+        if not cells or any(k in joined_low for k in SECTION_END_KEYWORDS):
             break
 
         def g(col_key: str) -> Any:
@@ -217,23 +191,21 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
             return row[idx] if idx is not None else None
 
         date_val = extract_date(g("date"))
+        if not date_val:
+            continue
+
         op_raw = g("type")
-        op_raw_s = str(op_raw).strip() if op_raw is not None else ""
+        op_raw_s = str(op_raw).strip() if op_raw else ""
+        if not op_raw_s:
+            continue
 
-        payment_raw = g("sum") or g("payment") or None
-        payment_sum = to_float(payment_raw)
-
+        payment_sum = to_float(g("sum"))
         currency_raw = g("currency")
-        currency = str(currency_raw).strip() if currency_raw is not None else ""
+        currency = str(currency_raw).strip() if currency_raw else ""
         currency_normalized = src.constants.CURRENCY_DICT.get(currency.upper(), currency.upper() if currency else "")
 
-        comment_raw = g("comment")
-        comment = str(comment_raw).strip() if comment_raw is not None else ""
-
-        ticker = ""
-        if "ticker" in cols:
-            ticker = str(g("ticker") or "").strip()
-
+        comment = str(g("comment") or "").strip()
+        ticker = str(g("ticker") or "").strip() if "ticker" in cols else ""
         isin_col = str(g("isin") or "").strip()
         isin = isin_col or None
         reg_number = ""
@@ -252,59 +224,40 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         quantity = to_int(g("quantity"))
         aci = to_float(g("aci"))
 
-        op_norm_raw = _norm(op_raw)
-        op_low = op_norm_raw
+        op_low = _norm(op_raw_s)
 
-        is_skip = False
-        if op_low:
-            is_skip = any(sk in op_low for sk in normalized_skip) or (op_low in normalized_skip)
-
-        is_known = False
-        if op_low:
-            is_known = (op_low in normalized_valid) or any(k in op_low for k in op_map_keys) or any(s in op_low for s in normalized_special_map)
-
-        if op_raw_s and (not is_skip) and (not is_known):
-            stats["unrecognized_names"].append(op_raw_s)
-        elif (not op_raw_s) and comment and (not is_skip) and (not is_known):
-            stats["unrecognized_names"].append(comment)
-
-        if op_low and any(skip_key in op_low for skip_key in normalized_skip):
-            logger.debug("Пропускаем операцию (по списку исключений): %s (строка %s)", op_raw_s, i)
+        # skiplist
+        if op_low in normalized_skip or any(sk in op_low for sk in normalized_skip):
             stats["skipped_skiplist"] += 1
             continue
 
+        # определение типа операции
         op_type: Optional[str] = None
-        matched_special_key = None
+
+        # специальные обработчики
         for norm_k, orig_k in normalized_special_map.items():
             if norm_k in op_low:
-                matched_special_key = orig_k
-                try:
-                    handler = special_handlers.get(orig_k)
-                    if callable(handler):
-                        entry = {
-                            "date": date_val,
-                            "raw_type": op_raw_s,
-                            "sum": payment_sum,
-                            "currency": currency_normalized,
-                            "comment": comment,
-                            "ticker": ticker,
-                            "isin": isin or "",
-                            "reg_number": reg_number or "",
-                        }
+                handler = special_handlers.get(orig_k)
+                if callable(handler):
+                    entry = {"date": date_val, "raw_type": op_raw_s, "sum": payment_sum, "comment": comment}
+                    try:
                         op_type = handler(payment_sum, entry)
-                except Exception:
-                    op_type = None
+                    except Exception:
+                        op_type = None
                 break
 
-        if not op_type and op_low and op_low in normalized_valid:
-            op_type = normalized_op_map.get(op_low, op_low.replace(" ", "_"))
+        # точное совпадение
+        if not op_type and op_low in normalized_op_map:
+            op_type = normalized_op_map[op_low]
 
+        # подстрока
         if not op_type:
             for k_norm, v in normalized_op_map.items():
                 if k_norm in op_low:
                     op_type = v
                     break
 
+        # fallback по знаку
         if not op_type:
             sign = src.constants.get_sign(payment_sum)
             if sign < 0:
@@ -315,15 +268,7 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
                 stats["skipped_zero_unknown"] += 1
                 continue
 
-        if op_type == "transfer":
-            sign = src.constants.get_sign(payment_sum)
-            if sign < 0:
-                op_type = "withdrawal"
-            elif sign > 0:
-                op_type = "deposit"
-
-        if op_type == "coupon" and (payment_sum is None or float(payment_sum) <= 0.0):
-            logger.debug("Пропускаем купон с неположительной суммой: %s (строка %s)", payment_sum, i)
+        if op_type == "coupon" and payment_sum <= 0.0:
             stats["skipped_coupon_nonpositive"] += 1
             continue
 
@@ -341,10 +286,9 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
             comment=comment,
             operation_id=str(g("operation_id") or "") or ""
         )
-
         ops.append(dto)
         stats["parsed"] += 1
 
     logger.info("Разобрано %s финансовых операций", len(ops))
-    stats["unrecognized_names"] = list(dict.fromkeys([n for n in stats["unrecognized_names"] if n]))
+    stats["unrecognized_names"] = list(dict.fromkeys(stats["unrecognized_names"]))
     return ops, stats

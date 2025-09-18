@@ -71,6 +71,7 @@ VALID_OPERATIONS = {
     "Проценты по займам \"овернайт ЦБ\"",
     "Частичное погашение облигации",
     "Вывод ДС",
+    "НДФЛ"
 }
 
 SKIP_OPERATIONS = {
@@ -95,17 +96,12 @@ NORMALIZED_SKIP_OPERATIONS = {norm_str(x) for x in SKIP_OPERATIONS}
 OPERATION_TYPE_MAP: Dict[str, str] = {
     _norm_key("Дивиденды"): "dividend",
     _norm_key("Купонный доход"): "coupon",
-    _norm_key("Куп. дох."): "coupon",
     _norm_key("Погашение ценных бумаг"): "repayment",
-    _norm_key("Погашение облигаций"): "repayment",
     _norm_key("Зачисление денежных средств"): "deposit",
-    _norm_key("Перевод денежных средств"): "transfer",
-    _norm_key("Частичное погашение облигации"): "amortization",
     _norm_key("Списание денежных средств"): "withdrawal",
     _norm_key("Вознаграждение Брокера"): "commission",
     _norm_key("Вознаграждение сторонних организаций"): "commission",
-    _norm_key("приход дс"): "deposit",
-    _norm_key("вывод дс"): "withdrawal",
+    _norm_key("Перевод денежных средств"): "withdrawal",
 }
 
 SPECIAL_OPERATION_HANDLERS: Dict[str, Callable[[Any, dict], str]] = {
