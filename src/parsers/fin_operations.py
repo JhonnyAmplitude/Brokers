@@ -33,8 +33,8 @@ def to_int(v: Any) -> int:
 
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", re.IGNORECASE)
 
-SECTION_RE_1 = re.compile(r"финанс\w*\s+операц", re.IGNORECASE)
-SECTION_RE_2 = re.compile(r"операц\w*.*сч(?:ет|ёт)|операции.*сч(?:ет|ёт)|операции\s+по\s+счет", re.IGNORECASE)
+SECTION_RE_1 = re.compile(r"движен\w* денежн\w* средств", re.IGNORECASE)
+
 
 HEADER_KEYWORDS = {
     "date": ["дата", "дата операции"],
@@ -68,29 +68,31 @@ def debug_print_matching_rows(file_path: str, keywords: List[str], max_rows: int
 
 
 def find_section_start(df: pd.DataFrame) -> Optional[int]:
-    """Ищем начало секции 'Финансовые операции' или 'Операции по счёту'."""
+    """Ищем начало секции финансовых операций"""
     for idx, row in df.iterrows():
         joined = " ".join([str(c) for c in row if str(c).strip()]).lower()
         if not joined:
             continue
-        if SECTION_RE_1.search(joined) or SECTION_RE_2.search(joined):
-            logger.debug("Найдена строка начала секции фин. операций: %s -> %s", idx, joined)
+        if (SECTION_RE_1.search(joined)):
+            logger.debug("Найдена строка начала секции: %s -> %s", idx, joined)
             return idx
     return None
 
 
 def find_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 40) -> Optional[int]:
-    """После section start ищем строку заголовка таблицы."""
-    n = len(df)
-    end = min(n, start_idx + lookahead + 1)
-    for i in range(start_idx + 1, end):
+    """Ищем строку с заголовками таблицы"""
+    for i in range(start_idx + 1, start_idx + lookahead + 1):
         row = df.iloc[i]
         cells = [str(c).strip().lower() for c in row if str(c).strip()]
-        if not cells:
-            continue
         joined = " ".join(cells)
-        if "дата" in joined and ("сумма" in joined or "валюта" in joined or "операц" in joined):
-            logger.debug("Найдена строка заголовка фин. таблицы: %s: %s", i, joined)
+
+        has_date = any("дата" in cell for cell in cells)
+        has_sum = any("сумма" in cell for cell in cells)
+        has_currency = any("валюта" in cell for cell in cells)
+        has_operation = any("операц" in cell for cell in cells)
+        has_type = any("тип" in cell for cell in cells)
+
+        if has_date and (has_sum or has_currency or has_operation or has_type):
             return i
     return None
 

@@ -31,12 +31,27 @@ HEADER_KEYWORDS_TRADES: Dict[str, List[str]] = {
 
 
 def find_trades_block_start(df: pd.DataFrame) -> Optional[int]:
-    needle = src.constants.norm_str("Заключенные в отчетном периоде сделки с ценными бумагами")
+    """
+    Ищем блок торгов. Сначала пытаемся найти точный заголовок "Завершенные..."
+    (как просил), если не найден — fallback на старый needle "Заключенные...".
+    Возвращаем индекс строки сразу после найденного заголовка.
+    """
+    # primary needle (точно тот, с которого надо начинать парсить)
+    primary = src.constants.norm_str("Завершенные в отчетном периоде сделки с ценными бумагами (обязательства прекращены)")
+    fallback = src.constants.norm_str("Заключенные в отчетном периоде сделки с ценными бумагами")
     for i, row in df.iterrows():
         text = " ".join(str(c) for c in row if str(c).strip())
         if not text:
             continue
-        if needle in src.constants.norm_str(text):
+        tnorm = src.constants.norm_str(text)
+        if primary in tnorm:
+            return i + 1
+    # fallback
+    for i, row in df.iterrows():
+        text = " ".join(str(c) for c in row if str(c).strip())
+        if not text:
+            continue
+        if fallback in src.constants.norm_str(text):
             return i + 1
     return None
 
@@ -61,11 +76,6 @@ def find_trades_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 8)
 
 
 def _build_combined_header(df: pd.DataFrame, header_idx: int, max_rows: int = 3) -> List[str]:
-    """
-    Собирает комбинированные заголовки по колонкам, объединяя up to max_rows строк,
-    начиная с header_idx. Возвращает список строк длиной = число колонок.
-    Это делает парсинг устойчивым к многострочным заголовкам.
-    """
     ncols = df.shape[1]
     rows = []
     end = min(len(df), header_idx + max_rows)
@@ -85,12 +95,7 @@ def _build_combined_header(df: pd.DataFrame, header_idx: int, max_rows: int = 3)
 
 
 def map_trades_header_indices(header_row: Union[pd.Series, List[str]]) -> Dict[str, int]:
-    """
-    Универсальная версия: header_row может быть Series (одна строка) или List[str]
-    (combination of multiple header lines per column). Возвращает маппинг ключ->index.
-    """
     cols: Dict[str, int] = {}
-    # если передана серия — превратим в list
     if isinstance(header_row, pd.Series):
         headers = [str(c).strip() for c in header_row.tolist()]
     else:
@@ -112,60 +117,49 @@ def map_trades_header_indices(header_row: Union[pd.Series, List[str]]) -> Dict[s
     return cols
 
 
-def parse_instrument_cell(cell: Any) -> Tuple[str, str, str]:
+def parse_instrument_cell(cell: Any) -> Tuple[str, str]:
     """
     Из поля 'Наименование ценной бумаги, № гос. Регистрации, ISIN'
-    возвращаем (ticker, isin, reg_number).
-    reg_number может быть строкой вида '1-01-20510-F' и т.п.
+    возвращаем (isin, reg_number).
     """
     s = "" if cell is None else str(cell).strip()
     if not s:
-        return "", "", ""
-    # try to find ISIN
-    m = ISIN_RE.search(s)
-    isin = m.group(0).upper() if m else ""
-    # split by common separators and try to get reg_number (usually second token)
+        return "", ""
+
+    m_isin = ISIN_RE.search(s)
+    isin = m_isin.group(0).upper() if m_isin else ""
+
     parts = [p.strip() for p in re.split(r"[,\t;/]+", s) if p.strip()]
+
     reg_number = ""
-    ticker = ""
-    if len(parts) >= 2:
-        # heuristic: parts often like [Name, reg_number, ISIN]
-        # try to find which part is reg_number (non-ISIN, contains digits and dash)
+    REG_LONG_RE = re.compile(r"\b[0-9A-ZА-Я]{1,6}[-/][0-9A-ZА-Я\-\/]{3,}[0-9A-ZА-Я]?\b", re.IGNORECASE)
+
+    for p in parts:
+        if p.upper() == isin:
+            continue
+        m = REG_LONG_RE.search(p)
+        if m:
+            reg_number = m.group(0).strip()
+            break
+
+    if not reg_number:
         for p in parts:
-            p_clean = p.strip()
-            if p_clean.upper() == isin:
+            if p.upper() == isin:
                 continue
-            if ISIN_RE.search(p_clean):
-                continue
-            # if looks like reg_number (contains digit and dash)
-            if re.search(r"[0-9]", p_clean) and "-" in p_clean:
-                reg_number = p_clean
-                continue
-        # ticker heuristic: take first token of first part if short
-        first = parts[0]
-        tok0 = first.split()[0]
-        if 1 <= len(tok0) <= 8:
-            ticker = tok0
-        else:
-            # fallback - try to find short token among parts
-            for p in parts:
-                candidate = p.split()[0]
-                if re.fullmatch(r"[A-Za-z0-9\-\.]{1,8}", candidate):
-                    ticker = candidate
-                    break
-    else:
-        # less structured: try pick a short token as ticker
-        tokens = re.split(r"[\s,;/]+", s)
-        for t in tokens:
-            if re.fullmatch(r"[A-Za-z0-9\-\.]{1,8}", t):
-                ticker = t
+            cleaned = re.sub(r"[^\w\-\/]", "", p)
+            if ("-" in cleaned or "/" in cleaned) and re.search(r"\d", cleaned) and len(cleaned) >= 5:
+                reg_number = p.strip()
                 break
-    return ticker, isin, reg_number
+
+    if reg_number:
+        reg_number = reg_number.strip().strip(".,;")
+
+    return isin, reg_number
 
 
-def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) -> tuple[List[OperationDTO], dict]:
+def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], combined_header: List[str]) -> tuple[List[OperationDTO], dict]:
     results: List[OperationDTO] = []
-    curr_ticker, curr_isin, curr_reg = "", "", ""
+    curr_isin, curr_reg = "", ""
 
     total_rows = 0
     parsed_rows = 0
@@ -175,6 +169,9 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
     skipped_no_type = 0
     skipped_itogo = 0
 
+    # find all commission-like columns from combined_header (could be 1 or 2 cols)
+    commission_cols: List[int] = [idx for idx, h in enumerate(combined_header) if "комис" in h]
+
     # iterate rows after header
     for r_idx in range(header_idx + 1, len(df)):
         total_rows += 1
@@ -182,31 +179,29 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
         cells = list(row)
         text_row = " ".join(str(c).strip() for c in cells if str(c).strip()).lower()
 
-        # --- стоп на новом блоке ---
-        if "завершенные" in text_row and "сделки с ценными бумагами" in text_row:
-            logger.debug("Reached closing trades block at row %s: %s", r_idx, text_row)
+        # stop if we've reached the "Незавершенные..." block
+        if "незавершенные" in text_row and "сделки с ценными бумагами" in text_row:
+            logger.debug("Reached 'Незавершенные' trades block at row %s: %s", r_idx, text_row)
             break
 
-        # --- пропускаем пустые строки ---
+        # stop on first truly empty row (end of the completed trades block)
         if all((c is None or (isinstance(c, str) and not c.strip())) for c in cells):
-            skipped_empty += 1
-            continue
+            logger.debug("Reached empty row -> end of trades block at row %s", r_idx)
+            break
 
         # --- игнорируем строки 'Итого' ---
         if any(isinstance(c, str) and src.constants.norm_str(c).startswith("итого") for c in cells):
             skipped_itogo += 1
             continue
 
-        # instrument: если есть — обновляем, если пусто — используем прошлое
+        # instrument: если есть — обновляем ISIN/reg, если пусто — используем прошлое
         inst_idx = cols.get("instrument")
         if inst_idx is not None and inst_idx < len(cells):
             inst_cell = cells[inst_idx]
             if inst_cell is not None and str(inst_cell).strip():
-                tck, isin, regno = parse_instrument_cell(inst_cell)
-                if tck:
-                    curr_ticker = tck
-                if isin:
-                    curr_isin = isin
+                isin_val, regno = parse_instrument_cell(inst_cell)
+                if isin_val:
+                    curr_isin = isin_val
                 if regno:
                     curr_reg = regno
 
@@ -295,12 +290,22 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
         if comm_idx is not None and comm_idx < len(cells):
             comment = str(cells[comm_idx]).strip()
 
+        # commission: sum over commission columns found in header
+        commission_sum = 0.0
+        for cidx in commission_cols:
+            try:
+                if cidx < len(cells):
+                    commission_sum += to_num_safe(cells[cidx])
+            except Exception:
+                continue
+        # round commission to 4 decimal places
+        commission_sum = round(commission_sum, 4)
+
         dto = OperationDTO(
             date=date_val,
             operation_type=op,
             payment_sum=total,
             currency=currency,
-            ticker=(curr_ticker or ""),
             isin=(curr_isin or ""),
             reg_number=(curr_reg or ""),
             price=pr,
@@ -308,6 +313,7 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int]) 
             aci=aci,
             comment=comment,
             operation_id=op_id,
+            commission=commission_sum,
         )
         results.append(dto)
         parsed_rows += 1
@@ -334,7 +340,7 @@ def parse_stock_bond_trades(file_path: Union[str, Any]) -> tuple[List[OperationD
     df = pd.read_excel(file_path, header=None, dtype=object).fillna("")
     start_idx = find_trades_block_start(df)
     if start_idx is None:
-        logger.info("Trades block 'Заключенные в отчетном периоде сделки с ценными бумагами' not found")
+        logger.info("Trades block not found")
         return [], {}
 
     header_idx = find_trades_header_row(df, start_idx)
@@ -342,20 +348,17 @@ def parse_stock_bond_trades(file_path: Union[str, Any]) -> tuple[List[OperationD
         logger.warning("Trades header row not found after block start; attempting to use start_idx as header")
         header_idx = start_idx
 
-    # build combined header to support multi-line headers
     combined_header = _build_combined_header(df, header_idx, max_rows=3)
     cols = map_trades_header_indices(combined_header)
     if not cols:
-        # fallback: try single header row
         header_row = df.iloc[header_idx]
         cols = map_trades_header_indices(header_row)
     if not cols:
         logger.warning("Could not map any trade columns from header row(s): %s", combined_header[:10])
         return [], {}
 
-    results, stats = parse_trades_table(df, header_idx, cols)
+    results, stats = parse_trades_table(df, header_idx, cols, combined_header)
 
-    # sort by date
     def key_fn(o: OperationDTO):
         d = o.date
         if isinstance(d, datetime):

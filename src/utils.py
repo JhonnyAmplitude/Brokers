@@ -25,21 +25,18 @@ DATE_RE = re.compile(r"\d{2}[,.]\d{2}[,.]\d{4}")
 def format_date_from_match(value: str) -> str:
     return value.replace(",", ".")
 
+
 def extract_date(value: Any) -> Optional[str]:
-    """
-    Попытка получить дату в формате DD.MM.YYYY из значения ячейки.
-    Поддерживает datetime и строки с разделителем ',' или '.'
-    """
-    if value is None:
-        return None
     if isinstance(value, datetime):
         return value.strftime("%d.%m.%Y")
-    s = str(value).strip()
-    if not s:
-        return None
-    m = DATE_RE.search(s)
-    if m:
-        return format_date_from_match(m.group(0))
+
+    s = str(value).strip() if value else ""
+    s = re.sub(r"[\s\u00A0]", "", s)  # Убираем все пробелы и NBSP
+
+    # Добавляем поддержку разных разделителей
+    if re.match(r"\d{2}[,.]\d{2}[,.]\d{4}", s):
+        return s.replace(",", ".")
+
     return None
 
 def to_num_safe(v: Any) -> float:

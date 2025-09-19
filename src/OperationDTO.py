@@ -16,6 +16,8 @@ class OperationDTO:
     aci: Optional[Union[str, float]] = 0.0
     comment: Optional[str] = ""
     operation_id: Optional[str] = ""
+    # new field: commission
+    commission: Optional[float] = 0.0
     _sort_key: Optional[str] = field(init=False, default=None)
 
     def __post_init__(self):
@@ -31,6 +33,17 @@ class OperationDTO:
                 self.aci = float(self.aci.replace(',', '.'))
             except ValueError:
                 self.aci = 0.0
+
+        if isinstance(self.commission, str):
+            try:
+                self.commission = float(self.commission.replace(',', '.'))
+            except Exception:
+                try:
+                    self.commission = float(self.commission)
+                except Exception:
+                    self.commission = 0.0
+        elif self.commission is None:
+            self.commission = 0.0
 
     def to_dict(self):
         result = asdict(self)
