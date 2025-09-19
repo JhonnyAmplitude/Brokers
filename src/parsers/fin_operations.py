@@ -228,9 +228,10 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
 
         op_low = _norm(op_raw_s)
 
-        # skiplist
+        # skiplist (строгое — если op_low прямо в списке или содержит паттерн)
         if op_low in normalized_skip or any(sk in op_low for sk in normalized_skip):
             stats["skipped_skiplist"] += 1
+            logger.debug("Пропускаем по skiplist: %s (row=%s)", op_raw_s, i)
             continue
 
         # определение типа операции
@@ -252,22 +253,38 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         if not op_type and op_low in normalized_op_map:
             op_type = normalized_op_map[op_low]
 
-        # подстрока
+        # подстрока (ключи OPERATION_TYPE_MAP)
         if not op_type:
             for k_norm, v in normalized_op_map.items():
                 if k_norm in op_low:
                     op_type = v
                     break
 
-        # fallback по знаку
+        # fallback по знаку — ТОЛЬКО если raw выглядит как валидный/распознаваемый тип
         if not op_type:
-            sign = src.constants.get_sign(payment_sum)
-            if sign < 0:
-                op_type = "withdrawal"
-            elif sign > 0:
-                op_type = "deposit"
+            looks_like_known = False
+            # 1) явно упомянут в VALID_OPERATIONS
+            if op_low in normalized_valid:
+                looks_like_known = True
+            # 2) содержит любую из нормализованных ключей OPERATION_TYPE_MAP (подстрока)
+            elif any(k in op_low for k in normalized_op_map.keys()):
+                looks_like_known = True
+
+            if looks_like_known:
+                sign = src.constants.get_sign(payment_sum)
+                if sign < 0:
+                    op_type = "withdrawal"
+                elif sign > 0:
+                    op_type = "deposit"
+                else:
+                    stats["skipped_zero_unknown"] += 1
+                    logger.debug("Пропуск: сумма нулевая и raw неизвестен (row=%s)", i)
+                    continue
             else:
-                stats["skipped_zero_unknown"] += 1
+                # Не похоже на известную операцию — считаем это "неинтересной" / мусорной строкой.
+                stats["skipped_skiplist"] += 1
+                stats["unrecognized_names"].append(op_raw_s)
+                logger.debug("Пропускаем неизвестный raw (не делаем fallback по знаку): %s (row=%s)", op_raw_s, i)
                 continue
 
         if op_type == "coupon" and payment_sum <= 0.0:
@@ -292,5 +309,6 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         stats["parsed"] += 1
 
     logger.info("Разобрано %s финансовых операций", len(ops))
+    # удаляем дубликаты в unrecognized_names
     stats["unrecognized_names"] = list(dict.fromkeys(stats["unrecognized_names"]))
     return ops, stats
