@@ -17,7 +17,7 @@ def parse_header(file_path: str) -> dict:
       - account_date_start (дата соглашения рядом с 'о предоставлении услуг')
       - date_start / date_end (период отчёта)
     """
-    df = pd.read_excel(file_path, header=None)  # даём pandas оставить типы (datetime возможен)
+    df = pd.read_excel(file_path, header=None)
     df = df.fillna("")
 
     account_id: Optional[str] = None

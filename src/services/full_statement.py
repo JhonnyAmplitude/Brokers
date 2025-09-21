@@ -1,8 +1,10 @@
+# src/services/full_statement.py
 from src.parsers.header import parse_header
 from src.parsers.fin_operations import parse_fin_operations
 from src.parsers.stocks_bonds import parse_stock_bond_trades
 from datetime import datetime
-from typing import Any
+from typing import Any, Dict, List
+
 
 def _make_fingerprint(op: Any) -> tuple:
     dt = getattr(op, "date", None)
@@ -21,26 +23,50 @@ def _make_fingerprint(op: Any) -> tuple:
     return ("fp", dstr, t, s_norm, ticker, isin)
 
 
-def parse_full_statement(file_path: str) -> dict:
+def parse_full_statement(file_path: str) -> Dict:
+    """
+    Парсит заголовок, финансовые операции и сделки с ценными бумагами.
+    Возвращает структуру:
+    {
+      ...header...,  # account_id, date_start, date_end, ...
+      "operations": [...],
+      "meta": {
+          "fin_ops_raw_count": int,
+          "trade_ops_raw_count": int,
+          "total_operations": int,
+          "fin_stats": {...},      # raw stats from fin parser
+          "trade_stats": {...},    # raw stats from trades parser
+          "unknown_fin_ops": [...],# список нераспознанных названий
+      }
+    }
+    """
     header = parse_header(file_path)
 
     fin_ops, fin_stats = parse_fin_operations(file_path)
     trade_ops, trade_stats = parse_stock_bond_trades(file_path)
 
-    unknown_fin_ops = fin_stats.get("unrecognized_names", [])
+    # Сделаем разумные значения по умолчанию если парсер вернул пустой словарь
+    fin_stats = fin_stats or {}
+    trade_stats = trade_stats or {}
+
+    fin_count = fin_stats.get("parsed", len(fin_ops))
+    trade_count = trade_stats.get("parsed", len(trade_ops))
+
+    # Собираем meta
+    meta = {
+        "fin_ops_raw_count": fin_count,
+        "trade_ops_raw_count": trade_count,
+        "total_operations": len(fin_ops) + len(trade_ops),
+        "fin_stats": fin_stats,
+        "trade_stats": trade_stats,
+        # В старом коде main ожидает meta["unknown_fin_ops"] -> вернуть список
+        "unknown_fin_ops": fin_stats.get("unrecognized_names", []),
+    }
+
+    operations = [*map(lambda o: o.to_dict(), fin_ops + trade_ops)]
 
     return {
         **header,
-        "operations": [*map(lambda op: op.to_dict(), fin_ops + trade_ops)],
-        "meta": {
-            "fin_ops_raw_count": len(fin_ops),
-            "trade_ops_raw_count": len(trade_ops),
-            "total_ops_count": len(fin_ops) + len(trade_ops),
-            "fin_ops_stats": fin_stats,
-            "trade_ops_stats": trade_stats,
-            "after_dedupe_from_fin": len(fin_ops),
-            "after_dedupe_from_trade": len(trade_ops),
-            "unknown_fin_ops": unknown_fin_ops,
-        },
+        "operations": operations,
+        "meta": meta,
     }
-

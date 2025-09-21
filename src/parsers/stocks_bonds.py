@@ -24,8 +24,6 @@ HEADER_KEYWORDS_TRADES: Dict[str, List[str]] = {
     "sum": ["сумма сделки", "сумма сделки в валюте расчетов", "сумма"],
     "aci": ["нкд"],
     "commission": ["комиссия банка", "комиссия"],
-    "order_no": ["№ заявки", "заявка"],
-    "trade_no": ["№ сделки", "номер сделки", "№сделки"],
     "comment": ["коммент", "комментарий"],
 }
 
@@ -38,7 +36,6 @@ def find_trades_block_start(df: pd.DataFrame) -> Optional[int]:
     """
     # primary needle (точно тот, с которого надо начинать парсить)
     primary = src.constants.norm_str("Завершенные в отчетном периоде сделки с ценными бумагами (обязательства прекращены)")
-    fallback = src.constants.norm_str("Заключенные в отчетном периоде сделки с ценными бумагами")
     for i, row in df.iterrows():
         text = " ".join(str(c) for c in row if str(c).strip())
         if not text:
@@ -46,14 +43,6 @@ def find_trades_block_start(df: pd.DataFrame) -> Optional[int]:
         tnorm = src.constants.norm_str(text)
         if primary in tnorm:
             return i + 1
-    # fallback
-    for i, row in df.iterrows():
-        text = " ".join(str(c) for c in row if str(c).strip())
-        if not text:
-            continue
-        if fallback in src.constants.norm_str(text):
-            return i + 1
-    return None
 
 
 def find_trades_header_row(df: pd.DataFrame, start_idx: int, lookahead: int = 8) -> Optional[int]:
@@ -350,6 +339,7 @@ def parse_stock_bond_trades(file_path: Union[str, Any]) -> tuple[List[OperationD
 
     combined_header = _build_combined_header(df, header_idx, max_rows=3)
     cols = map_trades_header_indices(combined_header)
+    logger.debug("Обнаружены колонки: %s", cols)
     if not cols:
         header_row = df.iloc[header_idx]
         cols = map_trades_header_indices(header_row)

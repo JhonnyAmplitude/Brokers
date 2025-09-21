@@ -17,7 +17,6 @@ def norm_str(s: Any) -> str:
         return ""
     st = str(s)
     st = _NBSP_PAT.sub(" ", st)
-    # unify whitespace
     st = re.sub(r"\s+", " ", st)
     return st.strip().lower()
 

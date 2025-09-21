@@ -1,34 +1,11 @@
-# src/parsers/fin_operations.py
 from __future__ import annotations
 from typing import Any, List, Optional, Dict, Tuple
 import re
 import pandas as pd
 
-from src.utils import logger, extract_date
+from src.utils import logger, extract_date, to_int_safe, to_num_safe
 from src.OperationDTO import OperationDTO
 import src.constants
-
-
-# ----------------- вспомогательные функции -----------------
-def to_float(v: Any) -> float:
-    if v is None:
-        return 0.0
-    try:
-        s = str(v).strip().replace(" ", "").replace("\u00A0", "")
-        s = s.replace(",", ".")
-        return float(s) if s not in ("", "-", "--") else 0.0
-    except Exception:
-        try:
-            return float(str(v).replace(",", "."))
-        except Exception:
-            return 0.0
-
-
-def to_int(v: Any) -> int:
-    try:
-        return int(round(float(str(v).strip().replace(",", ".").replace(" ", ""))))
-    except Exception:
-        return 0
 
 
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", re.IGNORECASE)
@@ -39,32 +16,12 @@ SECTION_RE_1 = re.compile(r"движен\w* денежн\w* средств", re.
 HEADER_KEYWORDS = {
     "date": ["дата", "дата операции"],
     "type": ["операц", "вид операции", "тип операции", "наименование операции"],
-    "sum": ["сумма", "сумма платежа", "платёж", "платеж"],
+    "sum": ["сумма", "сумма платежа"],
     "currency": ["валюта", "валютa", "вал."],
-    "comment": ["коммент", "примечан", "назначение", "информация"],
-    "price": ["цена"],
-    "quantity": ["количеств", "объем", "кол-во", "кол-во/объем"],
-    "ticker": ["тикер", "код"],
-    "isin": ["isin"],
-    "aci": ["нкд", "накопленный купонный доход", "нкд/aci", "aci"],
-    "operation_id": ["номер", "id", "ид"],
+    "comment": ["коммент", "примечан"],
 }
 
-SECTION_END_KEYWORDS = ("итого", "всего", "баланс", "остаток")
-
-
-def debug_print_matching_rows(file_path: str, keywords: List[str], max_rows: int = 200):
-    """Для отладки: печатает строки, где встречаются keywords."""
-    try:
-        df = pd.read_excel(file_path, header=None, dtype=object).fillna("")
-    except Exception:
-        return
-    for idx, row in df.iterrows():
-        joined = " ".join([str(c).strip().lower() for c in row if str(c).strip()])
-        if any(k in joined for k in keywords):
-            logger.info("Строка %s: %s", idx, joined)
-        if idx >= max_rows:
-            break
+SECTION_END_KEYWORDS = ("итого", "всего", "баланс", "Внебиржевой рынок")
 
 
 def find_section_start(df: pd.DataFrame) -> Optional[int]:
@@ -201,7 +158,7 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         if not op_raw_s:
             continue
 
-        payment_sum = to_float(g("sum"))
+        payment_sum = to_num_safe(g("sum"))
         currency_raw = g("currency")
         currency = str(currency_raw).strip() if currency_raw else ""
         currency_normalized = src.constants.CURRENCY_DICT.get(currency.upper(), currency.upper() if currency else "")
@@ -222,9 +179,9 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         if "reg_number" in cols:
             reg_number = str(g("reg_number") or reg_number or "").strip()
 
-        price = to_float(g("price"))
-        quantity = to_int(g("quantity"))
-        aci = to_float(g("aci"))
+        price = to_num_safe(g("price"))
+        quantity = to_int_safe(g("quantity"))
+        aci = to_num_safe(g("aci"))
 
         op_low = _norm(op_raw_s)
 
@@ -309,6 +266,5 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         stats["parsed"] += 1
 
     logger.info("Разобрано %s финансовых операций", len(ops))
-    # удаляем дубликаты в unrecognized_names
     stats["unrecognized_names"] = list(dict.fromkeys(stats["unrecognized_names"]))
     return ops, stats

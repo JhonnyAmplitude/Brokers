@@ -1,10 +1,12 @@
 # src/main.py
 import tempfile
 from pathlib import Path
+import asyncio
 
 from fastapi import FastAPI, UploadFile, File, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
+from starlette.middleware.cors import CORSMiddleware
 
 from src.services.full_statement import parse_full_statement
 from src.utils import logger
@@ -12,6 +14,12 @@ from src.utils import logger
 
 app = FastAPI(title="VTB Statement Parser API", version="1.0")
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get("/health")
 def health():
@@ -34,12 +42,16 @@ async def parse_report(file: UploadFile = File(...)):
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Не удалось сохранить файл")
 
     try:
-        result = parse_full_statement(str(tmp_path))
+        result = await asyncio.to_thread(parse_full_statement, str(tmp_path))
     except Exception as e:
         logger.exception("Ошибка парсинга: %s", e)
-        tmp_path.unlink(missing_ok=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Ошибка парсинга: {e}")
-
+    finally:
+        # гарантируем удаление temp-файла
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            logger.debug("Не удалось удалить временный файл %s", tmp_path)
     tmp_path.unlink(missing_ok=True)
 
     ops_count = len(result.get("operations", []))
