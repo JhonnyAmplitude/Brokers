@@ -1,4 +1,3 @@
-# src/parsers/stock_bond_trades.py
 from __future__ import annotations
 from typing import List, Any, Optional, Tuple, Union, Dict
 import re
@@ -8,12 +7,11 @@ from datetime import datetime
 
 from src.OperationDTO import OperationDTO
 from src.utils import logger, to_num_safe, to_int_safe
-import src.constants
 
-# Patterns
+from src.constants import norm_str, CURRENCY_DICT
+
 ISIN_RE = re.compile(r"\b[A-Za-z]{2}[A-Za-z0-9]{9}\d\b", re.IGNORECASE)
 
-# Keywords to detect header columns (we only map needed columns)
 HEADER_KEYWORDS_TRADES: Dict[str, List[str]] = {
     "instrument": ["наименование ценной бумаги", "isin", "регистрац", "№ гос. регистрац"],
     "datetime": ["дата и время", "дата и время заключения", "дата", "время"],
@@ -31,16 +29,15 @@ HEADER_KEYWORDS_TRADES: Dict[str, List[str]] = {
 def find_trades_block_start(df: pd.DataFrame) -> Optional[int]:
     """
     Ищем блок торгов. Сначала пытаемся найти точный заголовок "Завершенные..."
-    (как просил), если не найден — fallback на старый needle "Заключенные...".
+    , если не найден — fallback на старый needle "Заключенные...".
     Возвращаем индекс строки сразу после найденного заголовка.
     """
-    # primary needle (точно тот, с которого надо начинать парсить)
-    primary = src.constants.norm_str("Завершенные в отчетном периоде сделки с ценными бумагами (обязательства прекращены)")
+    primary = norm_str("Завершенные в отчетном периоде сделки с ценными бумагами (обязательства прекращены)")
     for i, row in df.iterrows():
         text = " ".join(str(c) for c in row if str(c).strip())
         if not text:
             continue
-        tnorm = src.constants.norm_str(text)
+        tnorm = norm_str(text)
         if primary in tnorm:
             return i + 1
 
@@ -93,12 +90,12 @@ def map_trades_header_indices(header_row: Union[pd.Series, List[str]]) -> Dict[s
     for idx, cell in enumerate(headers):
         if not cell:
             continue
-        low = src.constants.norm_str(cell)
+        low = norm_str(cell)
         for key, keywords in HEADER_KEYWORDS_TRADES.items():
             if key in cols:
                 continue
             for kw in keywords:
-                if src.constants.norm_str(kw) in low:
+                if norm_str(kw) in low:
                     cols[key] = idx
                     break
             if key in cols:
@@ -158,32 +155,26 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], 
     skipped_no_type = 0
     skipped_itogo = 0
 
-    # find all commission-like columns from combined_header (could be 1 or 2 cols)
     commission_cols: List[int] = [idx for idx, h in enumerate(combined_header) if "комис" in h]
 
-    # iterate rows after header
     for r_idx in range(header_idx + 1, len(df)):
         total_rows += 1
         row = df.iloc[r_idx]
         cells = list(row)
         text_row = " ".join(str(c).strip() for c in cells if str(c).strip()).lower()
 
-        # stop if we've reached the "Незавершенные..." block
         if "незавершенные" in text_row and "сделки с ценными бумагами" in text_row:
             logger.debug("Reached 'Незавершенные' trades block at row %s: %s", r_idx, text_row)
             break
 
-        # stop on first truly empty row (end of the completed trades block)
         if all((c is None or (isinstance(c, str) and not c.strip())) for c in cells):
             logger.debug("Reached empty row -> end of trades block at row %s", r_idx)
             break
 
-        # --- игнорируем строки 'Итого' ---
-        if any(isinstance(c, str) and src.constants.norm_str(c).startswith("итого") for c in cells):
+        if any(isinstance(c, str) and norm_str(c).startswith("итого") for c in cells):
             skipped_itogo += 1
             continue
 
-        # instrument: если есть — обновляем ISIN/reg, если пусто — используем прошлое
         inst_idx = cols.get("instrument")
         if inst_idx is not None and inst_idx < len(cells):
             inst_cell = cells[inst_idx]
@@ -194,7 +185,6 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], 
                 if regno:
                     curr_reg = regno
 
-        # datetime
         date_val = None
         dt_idx = cols.get("datetime")
         if dt_idx is not None and dt_idx < len(cells):
@@ -217,7 +207,6 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], 
             skipped_no_date += 1
             continue
 
-        # type
         op_type_raw = ""
         t_idx = cols.get("type")
         if t_idx is not None and t_idx < len(cells):
@@ -232,7 +221,6 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], 
             skipped_no_type += 1
             continue
 
-        # quantity — используем to_int_safe
         qty = 0
         q_idx = cols.get("quantity")
         if q_idx is not None and q_idx < len(cells):
@@ -241,45 +229,38 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], 
             skipped_no_qty += 1
             continue
 
-        # price
         pr = 0.0
         p_idx = cols.get("price")
         if p_idx is not None and p_idx < len(cells):
             pr = to_num_safe(cells[p_idx])
 
-        # currency
         currency = ""
         cur_idx = cols.get("currency_calc")
         if cur_idx is not None and cur_idx < len(cells):
             currency_raw = str(cells[cur_idx]).strip()
-            currency = src.constants.CURRENCY_DICT.get(currency_raw.upper(),
+            currency = CURRENCY_DICT.get(currency_raw.upper(),
                                                        currency_raw.upper() if currency_raw else "")
 
-        # sum
         total = 0.0
         s_idx = cols.get("sum")
         if s_idx is not None and s_idx < len(cells):
             total = to_num_safe(cells[s_idx])
 
-        # aci
         aci = 0.0
         aci_idx = cols.get("aci")
         if aci_idx is not None and aci_idx < len(cells):
             aci = to_num_safe(cells[aci_idx])
 
-        # trade number / operation id
         op_id = ""
         trade_idx = cols.get("trade_no")
         if trade_idx is not None and trade_idx < len(cells):
             op_id = str(cells[trade_idx]).strip()
 
-        # comment
         comment = ""
         comm_idx = cols.get("comment")
         if comm_idx is not None and comm_idx < len(cells):
             comment = str(cells[comm_idx]).strip()
 
-        # commission: sum over commission columns found in header
         commission_sum = 0.0
         for cidx in commission_cols:
             try:
@@ -287,7 +268,6 @@ def parse_trades_table(df: pd.DataFrame, header_idx: int, cols: Dict[str, int], 
                     commission_sum += to_num_safe(cells[cidx])
             except Exception:
                 continue
-        # round commission to 4 decimal places
         commission_sum = round(commission_sum, 4)
 
         dto = OperationDTO(

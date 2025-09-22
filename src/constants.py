@@ -1,8 +1,6 @@
-# src/constants.py
 from typing import Any, Callable, Dict, Optional
 import re
 
-# ---- Helpers ----
 _NBSP_PAT = re.compile(r"[\u00A0\u202F]")
 
 def norm_str(s: Any) -> str:
@@ -31,7 +29,10 @@ def to_float_safe(v: Any) -> Optional[float]:
     if v is None or v == "":
         return None
     try:
-        return float(str(v).replace(",", ".").replace(" ", ""))
+        s = str(v)
+        s = _NBSP_PAT.sub(" ", s)
+        s = s.replace(",", ".").replace(" ", "")
+        return float(s)
     except Exception:
         return None
 
@@ -43,9 +44,8 @@ def get_sign(value: Any) -> int:
        0 если равно нулю или не удалось распарсить;
       +1 если положительное.
     """
-    try:
-        v = float(str(value).replace(",", ".").replace(" ", ""))
-    except Exception:
+    v = to_float_safe(value)
+    if v is None:
         return 0
     if v > 0:
         return 1
@@ -74,8 +74,6 @@ VALID_OPERATIONS = {
 }
 
 SKIP_OPERATIONS = {
-    "Перераспределение дохода между субсчетами / торговыми площадками",
-    "Перераспределение дохода",
     "Сальдо расчётов по сделкам с ценными бумагами",
     "Сальдо расчетов по сделкам",
     "Внебиржевая сделка FX (22*)",
@@ -106,7 +104,8 @@ OPERATION_TYPE_MAP: Dict[str, str] = {
 SPECIAL_OPERATION_HANDLERS: Dict[str, Callable[[Any, dict], str]] = {
     _norm_key("Вознаграждение компании"): lambda amount, entry: "commission_refund" if get_sign(amount) > 0 else "commission",
     _norm_key("НДФЛ"): lambda amount, entry: "refund" if get_sign(amount) > 0 else "withholding",
-    # _norm_key("Перевод денежных средств"): lambda amount, entry: "deposit" if get_sign(amount) > 0 else "withdrawal",
+    # Обработка перераспределения дохода — теперь не скипается, а корректно определяется по знаку суммы.
+    _norm_key("Перераспределение дохода"): lambda amount, entry: "internal_transfer" if get_sign(amount) > 0 else "withdrawal",
 }
 
 
@@ -132,7 +131,7 @@ CURRENCY_DICT = {
     "AED": "AED", "AMD": "AMD", "BYN": "BYN", "CHF": "CHF", "CNY": "CNY",
     "EUR": "EUR", "GBP": "GBP", "HKD": "HKD", "JPY": "JPY", "KGS": "KGS",
     "KZT": "KZT", "NOK": "NOK", "RUB": "RUB", "RUR": "RUB",
-    "РУБЛЬ": "RUB", "Рубль": "RUB",
+    "РУБЛЬ": "RUB", "РУБ": "RUB", "Рубль": "RUB", "Руб": "RUB",
     "SEK": "SEK", "TJS": "TJS", "TRY": "TRY", "USD": "USD", "UZS": "UZS",
-    "XAG": "XAG", "XAU": "XAU", "ZAR": "ZAR"
+    "XAG": "XAG", "XAU": "XAU", "ZAR": "ZAR", "₽": "RUB"
 }

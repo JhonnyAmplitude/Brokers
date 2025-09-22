@@ -7,7 +7,6 @@ from src.utils import logger, extract_date, to_int_safe, to_num_safe
 from src.OperationDTO import OperationDTO
 import src.constants
 
-
 ISIN_RE = re.compile(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", re.IGNORECASE)
 
 SECTION_RE_1 = re.compile(r"движен\w* денежн\w* средств", re.IGNORECASE)
@@ -89,7 +88,6 @@ def extract_isin_and_reg(comment: str) -> Tuple[Optional[str], Optional[str]]:
     return isin, reg
 
 
-# ----------------- основной парсер -----------------
 def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
     logger.info("Парсим финансовые операции из %s", file_path)
     try:
@@ -109,9 +107,12 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         "skipped_zero_unknown": 0,
         "skipped_coupon_nonpositive": 0,
         "unrecognized_names": [],
+        "amortizations": 0,
+        "repayments": 0,
+        "coupon_positive": 0,
+        "reallocations_positive": 0,
     }
 
-    # helpers
     _norm = getattr(src.constants, "norm_str", lambda x: str(x).strip().lower() if x else "")
     normalized_skip = { _norm(x) for x in getattr(src.constants, "SKIP_OPERATIONS", set()) }
     normalized_valid = { _norm(x) for x in getattr(src.constants, "VALID_OPERATIONS", set()) }
@@ -156,6 +157,11 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
         op_raw = g("type")
         op_raw_s = str(op_raw).strip() if op_raw else ""
         if not op_raw_s:
+            comment_tmp = str(g("comment") or "").strip()
+            if comment_tmp:
+                stats["skipped_skiplist"] += 1
+                stats["unrecognized_names"].append(comment_tmp)
+                logger.warning("Пропускаем неизвестную операцию (не найден type) — %s (row=%s)", comment_tmp, i)
             continue
 
         payment_sum = to_num_safe(g("sum"))
@@ -185,16 +191,47 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
 
         op_low = _norm(op_raw_s)
 
-        # skiplist (строгое — если op_low прямо в списке или содержит паттерн)
+        c_norm = _norm(comment or "")
+
+        if "погаш" in op_low:
+            if payment_sum is None:
+                pass
+            elif payment_sum < 0:
+                op_type = "withdrawal"
+            elif payment_sum > 0:
+                if ("част" in c_norm and "погаш" in c_norm and any(k in c_norm for k in ("номин", "номинал", "обл"))):
+                    op_type = "amortization"
+                    stats["amortizations"] = stats.get("amortizations", 0) + 1
+                else:
+                    op_type = "repayment"
+                    stats["repayments"] = stats.get("repayments", 0) + 1
+
+        elif any(k in op_low for k in ("купон", "купонный", "куп")) or any(k in c_norm for k in ("купон", "купонный", "куп")):
+            if payment_sum is None:
+                pass
+            elif payment_sum < 0:
+                op_type = "withdrawal"
+            elif payment_sum > 0:
+                op_type = "coupon"
+                stats["coupon_positive"] = stats.get("coupon_positive", 0) + 1
+
+        elif any(k in op_low for k in ("перераспредел", "перераспред", "распределение между")) or any(k in c_norm for k in ("перераспредел", "перераспред", "распределение между")):
+            if payment_sum is None:
+                pass
+            elif payment_sum < 0:
+                op_type = "withdrawal"
+            elif payment_sum > 0:
+                stats["reallocations_positive"] = stats.get("reallocations_positive", 0) + 1
+                logger.debug("Positive redistribution detected (row=%s raw=%s comment=%s)", i, op_raw_s, comment)
+                op_type = "internal_transfer"
+
         if op_low in normalized_skip or any(sk in op_low for sk in normalized_skip):
             stats["skipped_skiplist"] += 1
             logger.debug("Пропускаем по skiplist: %s (row=%s)", op_raw_s, i)
             continue
 
-        # определение типа операции
         op_type: Optional[str] = None
 
-        # специальные обработчики
         for norm_k, orig_k in normalized_special_map.items():
             if norm_k in op_low:
                 handler = special_handlers.get(orig_k)
@@ -206,24 +243,19 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
                         op_type = None
                 break
 
-        # точное совпадение
         if not op_type and op_low in normalized_op_map:
             op_type = normalized_op_map[op_low]
 
-        # подстрока (ключи OPERATION_TYPE_MAP)
         if not op_type:
             for k_norm, v in normalized_op_map.items():
                 if k_norm in op_low:
                     op_type = v
                     break
 
-        # fallback по знаку — ТОЛЬКО если raw выглядит как валидный/распознаваемый тип
         if not op_type:
             looks_like_known = False
-            # 1) явно упомянут в VALID_OPERATIONS
             if op_low in normalized_valid:
                 looks_like_known = True
-            # 2) содержит любую из нормализованных ключей OPERATION_TYPE_MAP (подстрока)
             elif any(k in op_low for k in normalized_op_map.keys()):
                 looks_like_known = True
 
@@ -238,10 +270,9 @@ def parse_fin_operations(file_path: str) -> tuple[List[OperationDTO], dict]:
                     logger.debug("Пропуск: сумма нулевая и raw неизвестен (row=%s)", i)
                     continue
             else:
-                # Не похоже на известную операцию — считаем это "неинтересной" / мусорной строкой.
                 stats["skipped_skiplist"] += 1
                 stats["unrecognized_names"].append(op_raw_s)
-                logger.debug("Пропускаем неизвестный raw (не делаем fallback по знаку): %s (row=%s)", op_raw_s, i)
+                logger.warning("Пропускаем неизвестный raw: %s (row=%s)", op_raw_s, i)
                 continue
 
         if op_type == "coupon" and payment_sum <= 0.0:

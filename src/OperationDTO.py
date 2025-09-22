@@ -16,7 +16,6 @@ class OperationDTO:
     aci: Optional[Union[str, float]] = 0.0
     comment: Optional[str] = ""
     operation_id: Optional[str] = ""
-    # new field: commission
     commission: Optional[float] = 0.0
     _sort_key: Optional[str] = field(init=False, default=None)
 

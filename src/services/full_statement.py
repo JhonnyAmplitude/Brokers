@@ -45,21 +45,18 @@ def parse_full_statement(file_path: str) -> Dict:
     fin_ops, fin_stats = parse_fin_operations(file_path)
     trade_ops, trade_stats = parse_stock_bond_trades(file_path)
 
-    # Сделаем разумные значения по умолчанию если парсер вернул пустой словарь
     fin_stats = fin_stats or {}
     trade_stats = trade_stats or {}
 
     fin_count = fin_stats.get("parsed", len(fin_ops))
     trade_count = trade_stats.get("parsed", len(trade_ops))
 
-    # Собираем meta
     meta = {
         "fin_ops_raw_count": fin_count,
         "trade_ops_raw_count": trade_count,
         "total_operations": len(fin_ops) + len(trade_ops),
         "fin_stats": fin_stats,
         "trade_stats": trade_stats,
-        # В старом коде main ожидает meta["unknown_fin_ops"] -> вернуть список
         "unknown_fin_ops": fin_stats.get("unrecognized_names", []),
     }
 

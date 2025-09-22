@@ -33,7 +33,6 @@ def extract_date(value: Any) -> Optional[str]:
     s = str(value).strip() if value else ""
     s = re.sub(r"[\s\u00A0]", "", s)  # Убираем все пробелы и NBSP
 
-    # Добавляем поддержку разных разделителей
     if re.match(r"\d{2}[,.]\d{2}[,.]\d{4}", s):
         return s.replace(",", ".")
 
